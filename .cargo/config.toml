@@ -1,0 +1,5 @@
+[build]
+rustflags = ["-C", "target-cpu=native"]
+
+[env]
+SLINT_BACKEND = "winit-software"

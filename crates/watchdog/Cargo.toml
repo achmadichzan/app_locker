@@ -1,0 +1,10 @@
+[package]
+name = "watchdog"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process"] }
+tracing.workspace = true
+tracing-subscriber = "0.3"
+anyhow.workspace = true

@@ -1,0 +1,20 @@
+[workspace]
+members = [
+    "crates/core",
+    "crates/infra",
+    "crates/daemon",
+    "crates/watchdog",
+    "crates/ui"
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Achmad Ichzan"]
+
+[workspace.dependencies]
+sysinfo = "0.30"
+tokio = { version = "1.36", features = ["full"] }
+anyhow = "1.0"
+tracing = "0.1"

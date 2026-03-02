@@ -216,6 +216,28 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
         }
     });
 
+    ui.set_startup_enabled(app_core::is_startup_enabled());
+
+    let ui_weak = ui.as_weak();
+    ui.on_toggle_startup(move || {
+        let ui = ui_weak.unwrap();
+        let new_state = !ui.get_startup_enabled();
+
+        match app_core::set_startup_enabled(new_state) {
+            Ok(_) => {
+                ui.set_startup_enabled(new_state);
+                if new_state {
+                    ui.set_startup_status_msg("✅ Startup diaktifkan!".into());
+                } else {
+                    ui.set_startup_status_msg("✅ Startup dinonaktifkan.".into());
+                }
+            }
+            Err(e) => {
+                ui.set_startup_status_msg(format!("❌ Gagal: {}", e).into());
+            }
+        }
+    });
+
     ui.run()
 }
 

@@ -16,6 +16,8 @@ export component ManagementPanel inherits Window {
     in-out property <string> new-password: "";
     in-out property <string> confirm-password: "";
     in-out property <string> password-status-msg: "";
+    in-out property <bool> startup-enabled: false;
+    in-out property <string> startup-status-msg: "";
 
     callback toggle-app(int);
     callback add-app(string);
@@ -25,6 +27,7 @@ export component ManagementPanel inherits Window {
     callback fetch-running-apps();
     callback select-running-app(string);
     callback change-password(string, string, string);
+    callback toggle-startup();
 
     title: "App Locker";
     width: 480px;
@@ -292,6 +295,61 @@ export component ManagementPanel inherits Window {
                 text: root.status-msg;
                 font-size: 12px;
                 color: #16a34a;
+                horizontal-alignment: center;
+            }
+
+            Rectangle {
+                height: 52px;
+                border-radius: 10px;
+                background: #16213e;
+                border-color: #0f3460;
+                border-width: 1px;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 12px;
+
+                    Text {
+                        text: "🚀  Jalankan saat startup";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: #e8e8f0;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    Rectangle {
+                        width: 48px;
+                        height: 26px;
+                        border-radius: 13px;
+                        background: root.startup-enabled ? #16a34a : #3a3a55;
+                        y: (parent.height - self.height) / 2;
+
+                        animate background { duration: 200ms; easing: ease-in-out; }
+
+                        Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 10px;
+                            background: white;
+                            y: 3px;
+                            x: root.startup-enabled ? parent.width - self.width - 3px : 3px;
+
+                            animate x { duration: 200ms; easing: ease-in-out; }
+                        }
+
+                        startup-ta := TouchArea {
+                            clicked => { root.toggle-startup(); }
+                        }
+                    }
+                }
+            }
+
+            if root.startup-status-msg != "": Text {
+                text: root.startup-status-msg;
+                font-size: 12px;
+                color: root.startup-status-msg == "✅ Startup diaktifkan!" || root.startup-status-msg == "✅ Startup dinonaktifkan." ? #16a34a : #ff6b6b;
                 horizontal-alignment: center;
             }
 

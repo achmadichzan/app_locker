@@ -73,3 +73,43 @@ pub enum IpcResponse {
     PasswordChanged,
     Error(String),
 }
+
+const REGISTRY_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
+const REGISTRY_VALUE_NAME: &str = "AppLocker";
+
+#[cfg(target_os = "windows")]
+pub fn is_startup_enabled() -> bool {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    if let Ok(key) = hkcu.open_subkey(REGISTRY_KEY) {
+        key.get_value::<String, _>(REGISTRY_VALUE_NAME).is_ok()
+    } else {
+        false
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub fn set_startup_enabled(enabled: bool) -> Result<()> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+
+    if enabled {
+        let exe_dir = std::env::current_exe()?
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("Tidak dapat menemukan parent directory"))?
+            .to_path_buf();
+        let daemon_path = exe_dir.join("daemon.exe");
+
+        let (key, _) = hkcu.create_subkey(REGISTRY_KEY)?;
+        key.set_value(REGISTRY_VALUE_NAME, &daemon_path.to_string_lossy().to_string())?;
+    } else {
+        let key = hkcu.open_subkey_with_flags(REGISTRY_KEY, KEY_WRITE)?;
+        key.delete_value(REGISTRY_VALUE_NAME).ok();
+    }
+
+    Ok(())
+}

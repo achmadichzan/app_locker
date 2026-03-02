@@ -413,6 +413,8 @@ export component AppPrompt inherits Window {
     no-frame: false;
     background: #1a1a2e;
 
+    init => { input.focus(); }
+
     FocusScope {
         key-pressed(event) => {
             if event.text == Key.Escape {

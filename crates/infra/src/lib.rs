@@ -71,6 +71,8 @@ impl ProcessMonitor for WindowsProcessManager {
     }
 
     fn kill_process(&self, pid: u32) -> Result<()> {
+        let _ = self.resume_process(pid);
+
         unsafe {
             let handle = OpenProcess(PROCESS_TERMINATE, false, pid)
                 .map_err(|e| anyhow!("Gagal membuka proses {}: {}", pid, e))?;

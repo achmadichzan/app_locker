@@ -9,11 +9,16 @@ export component ManagementPanel inherits Window {
     in-out property <[AppItem]> apps: [];
     in-out property <string> new-app-name: "";
     in-out property <string> status-msg: "";
+    in-out property <[string]> running-apps: [];
+    in-out property <bool> show-running-apps: false;
 
     callback toggle-app(int);
     callback add-app(string);
     callback remove-app(int);
     callback save-config();
+    callback browse-file();
+    callback fetch-running-apps();
+    callback select-running-app(string);
 
     title: "App Locker";
     width: 480px;
@@ -111,8 +116,8 @@ export component ManagementPanel inherits Window {
         }
 
         HorizontalLayout {
-            spacing: 10px;
-            height: 38px;
+            spacing: 12px;
+            height: 44px;
 
             app-input := LineEdit {
                 placeholder-text: "Contoh: chrome.exe";
@@ -122,8 +127,57 @@ export component ManagementPanel inherits Window {
             }
 
             Rectangle {
-                width: 90px;
-                height: 38px;
+                width: 48px;
+                height: 44px;
+                border-radius: 8px;
+                background: browse-ta.has-hover ? #2a2a44 : #252540;
+                border-color: #3a3a55;
+                border-width: 1px;
+
+                browse-ta := TouchArea {
+                    clicked => { root.browse-file(); }
+                }
+
+                Text {
+                    text: "📁";
+                    font-size: 16px;
+                    width: 24px;
+                    height: 28px;
+                    vertical-alignment: center;
+                    horizontal-alignment: center;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+
+            Rectangle {
+                width: 48px;
+                height: 44px;
+                border-radius: 8px;
+                background: run-ta.has-hover ? #2a2a44 : #252540;
+                border-color: #3a3a55;
+                border-width: 1px;
+
+                run-ta := TouchArea {
+                    clicked => { root.fetch-running-apps(); }
+                }
+
+                Text {
+                    text: "⚙";
+                    font-size: 16px;
+                    width: 24px;
+                    height: 28px;
+                    vertical-alignment: center;
+                    color: root.show-running-apps ? #16a34a : #e8e8f0;
+                    horizontal-alignment: center;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                }
+            }
+
+            Rectangle {
+                width: 96px;
+                height: 44px;
                 border-radius: 8px;
                 background: add-ta.has-hover ? #1a6b3a : #16a34a;
 
@@ -143,6 +197,67 @@ export component ManagementPanel inherits Window {
                     color: white;
                     horizontal-alignment: center;
                     vertical-alignment: center;
+                }
+            }
+        }
+        
+        if root.show-running-apps: Rectangle {
+            background: #16213e;
+            border-radius: 8px;
+            border-color: #0f3460;
+            border-width: 1px;
+            height: 180px;
+
+            VerticalLayout {
+                padding: 4px;
+                HorizontalLayout {
+                    alignment: space-between;
+                    padding-left: 8px;
+                    padding-right: 8px;
+                    padding-bottom: 4px;
+                    Text {
+                        text: "Aplikasi Berjalan:";
+                        font-size: 12px;
+                        color: #8888aa;
+                    }
+                    TouchArea {
+                        width: 16px;
+                        height: 16px;
+                        clicked => { root.show-running-apps = false; }
+                        Text {
+                            text: "✕";
+                            font-size: 12px;
+                            color: #ff6b6b;
+                        }
+                    }
+                }
+                
+                ScrollView {
+                    VerticalLayout {
+                        spacing: 2px;
+                        for app-name in root.running-apps: Rectangle {
+                            height: 28px;
+                            background: app-ta.has-hover ? #2a4a8a : transparent;
+                            border-radius: 4px;
+
+                            app-ta := TouchArea {
+                                clicked => { 
+                                    root.select-running-app(app-name);
+                                    root.show-running-apps = false;
+                                }
+                            }
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                Text {
+                                    text: app-name;
+                                    font-size: 13px;
+                                    color: #e8e8f0;
+                                    vertical-alignment: center;
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

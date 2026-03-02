@@ -72,11 +72,14 @@ async fn main() -> anyhow::Result<()> {
 
         let active_apps: HashSet<String> =
             processes.iter().map(|p| p.name.to_lowercase()).collect();
+        let active_pids: HashSet<u32> = processes.iter().map(|p| p.pid).collect();
+        
         unlocked_apps
             .lock()
             .await
             .retain(|app| active_apps.contains(app));
         prompting_lock.retain(|app| active_apps.contains(app));
+        pids_lock.retain(|pid| active_pids.contains(pid));
 
         let target_apps: Vec<String> = config.lock().await.locked_apps.clone();
 
@@ -90,32 +93,38 @@ async fn main() -> anyhow::Result<()> {
             {
                 info!("Mencegat aplikasi: {} (PID: {})", process.name, pid);
 
-                if monitor.suspend_process(pid).is_ok() {
-                    pids_lock.insert(pid);
+                match monitor.suspend_process(pid) {
+                    Ok(_) => {
+                        pids_lock.insert(pid);
 
-                    if !prompting_lock.contains(&proc_name) {
-                        prompting_lock.insert(proc_name.clone());
+                        if !prompting_lock.contains(&proc_name) {
+                            prompting_lock.insert(proc_name.clone());
 
-                        match std::process::Command::new(&ui_path)
-                            .arg(pid.to_string())
-                            .arg(&proc_name)
-                            .spawn()
-                        {
-                            Ok(_) => {
-                                info!("UI prompt diluncurkan untuk {}", proc_name);
+                            match std::process::Command::new(&ui_path)
+                                .arg(pid.to_string())
+                                .arg(&proc_name)
+                                .spawn()
+                            {
+                                Ok(_) => {
+                                    info!("UI prompt diluncurkan untuk {}", proc_name);
+                                }
+                                Err(e) => {
+                                    error!("Gagal meluncurkan UI: {}. Melepas PID {} kembali.", e, pid);
+                                    let _ = monitor.resume_process(pid);
+                                    pids_lock.remove(&pid);
+                                    prompting_lock.remove(&proc_name);
+                                }
                             }
-                            Err(e) => {
-                                error!("Gagal meluncurkan UI: {}. Melepas PID {} kembali.", e, pid);
-                                let _ = monitor.resume_process(pid);
-                                pids_lock.remove(&pid);
-                                prompting_lock.remove(&proc_name);
-                            }
+                        } else {
+                            info!(
+                                "Aplikasi {} (PID: {}) ditangguhkan (menunggu prompt selesai)",
+                                proc_name, pid
+                            );
                         }
-                    } else {
-                        info!(
-                            "Aplikasi {} (PID: {}) ditangguhkan (menunggu prompt selesai)",
-                            proc_name, pid
-                        );
+                    }
+                    Err(e) => {
+                        error!("Gagal menangguhkan {} (PID: {}): {}. Kemungkinan butuh akses Administrator.", proc_name, pid, e);
+                        pids_lock.insert(pid);
                     }
                 }
             }
@@ -236,10 +245,9 @@ async fn handle_ipc_client(
 
             for p in processes {
                 if p.name.to_lowercase() == app_name.to_lowercase() {
-                    let mut lock = suspended_pids.lock().await;
+                    let lock = suspended_pids.lock().await;
                     if lock.contains(&p.pid) {
                         pids_to_kill.push(p.pid);
-                        lock.remove(&p.pid);
                     }
                 }
             }

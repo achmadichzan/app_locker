@@ -110,6 +110,50 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
     });
 
     let ui_weak = ui.as_weak();
+    ui.on_browse_file(move || {
+        if let Some(path) = rfd::FileDialog::new()
+            .add_filter("Executable", &["exe"])
+            .pick_file() 
+        {
+            if let Some(file_name) = path.file_name().and_then(|n| n.to_str()) {
+                if let Some(ui) = ui_weak.upgrade() {
+                    ui.set_new_app_name(file_name.into());
+                }
+            }
+        }
+    });
+
+    let ui_weak = ui.as_weak();
+    ui.on_fetch_running_apps(move || {
+        let mut sys = sysinfo::System::new_all();
+        sys.refresh_processes();
+        
+        let mut app_names: Vec<String> = sys.processes()
+            .values()
+            .map(|p| p.name().to_string())
+            .filter(|name: &String| name.to_lowercase().ends_with(".exe"))
+            .collect();
+            
+        app_names.sort();
+        app_names.dedup();
+
+        if let Some(ui) = ui_weak.upgrade() {
+            let model = std::rc::Rc::new(slint::VecModel::from(
+                app_names.into_iter().map(slint::SharedString::from).collect::<Vec<_>>()
+            ));
+            ui.set_running_apps(model.into());
+            ui.set_show_running_apps(!ui.get_show_running_apps());
+        }
+    });
+
+    let ui_weak = ui.as_weak();
+    ui.on_select_running_app(move |app_name| {
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.set_new_app_name(app_name);
+        }
+    });
+
+    let ui_weak = ui.as_weak();
     ui.on_save_config(move || {
         let ui = ui_weak.unwrap();
         let apps = model_to_vec(&ui.get_apps());

@@ -30,8 +30,8 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
-            locked_apps: vec!["notepad.exe".to_string()],
-            password: "rust2026".to_string(),
+            locked_apps: vec![],
+            password: "".to_string(),
         }
     }
 }

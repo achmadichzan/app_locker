@@ -35,8 +35,13 @@ foreach ($Exe in $Executables) {
     }
 }
 
+# Salin script start dan stop
+Copy-Item -Path "start.bat" -Destination "$OutputDir\start.bat" -Force
+Copy-Item -Path "stop.bat" -Destination "$OutputDir\stop.bat" -Force
+Write-Host "  -> Berhasil menyalin start.bat dan stop.bat" -ForegroundColor Green
+
 Write-Host ""
 Write-Host "=================================================" -ForegroundColor Cyan
 Write-Host "Build Selesai! Aplikasi siap dijalankan di dalam folder '$OutputDir'." -ForegroundColor Green
-Write-Host "Cara menjalankan: Buka folder 'dist' dan jalankan 'daemon.exe'." -ForegroundColor Cyan
+Write-Host "Cara menjalankan: Buka folder 'dist' dan jalankan 'start.bat'." -ForegroundColor Cyan
 Write-Host "=================================================" -ForegroundColor Cyan

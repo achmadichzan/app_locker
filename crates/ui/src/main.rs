@@ -173,6 +173,49 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
         }
     });
 
+    let ui_weak = ui.as_weak();
+    ui.on_change_password(move |old_pw, new_pw, confirm_pw| {
+        let ui = ui_weak.unwrap();
+
+        if old_pw.is_empty() || new_pw.is_empty() || confirm_pw.is_empty() {
+            ui.set_password_status_msg("Semua field harus diisi.".into());
+            return;
+        }
+
+        if new_pw != confirm_pw {
+            ui.set_password_status_msg("Password baru tidak cocok.".into());
+            return;
+        }
+
+        if new_pw == old_pw {
+            ui.set_password_status_msg("Password baru harus berbeda dari password lama.".into());
+            return;
+        }
+
+        let request = IpcRequest::ChangePassword {
+            old_password: old_pw.to_string(),
+            new_password: new_pw.to_string(),
+        };
+
+        match send_ipc_request(request) {
+            Some(IpcResponse::PasswordChanged) => {
+                ui.set_password_status_msg("✅ Password berhasil diubah!".into());
+                ui.set_old_password("".into());
+                ui.set_new_password("".into());
+                ui.set_confirm_password("".into());
+            }
+            Some(IpcResponse::WrongPassword) => {
+                ui.set_password_status_msg("Password lama salah!".into());
+            }
+            Some(IpcResponse::Error(e)) => {
+                ui.set_password_status_msg(format!("Gagal: {}", e).into());
+            }
+            _ => {
+                ui.set_password_status_msg("Gagal terhubung ke daemon.".into());
+            }
+        }
+    });
+
     ui.run()
 }
 

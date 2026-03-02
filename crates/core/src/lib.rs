@@ -60,11 +60,16 @@ impl AppConfig {
 pub enum IpcRequest {
     UnlockApp { app_name: String, password: String },
     CancelUnlock { app_name: String },
+    ChangePassword {
+        old_password: String,
+        new_password: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum IpcResponse {
     Success,
     WrongPassword,
+    PasswordChanged,
     Error(String),
 }

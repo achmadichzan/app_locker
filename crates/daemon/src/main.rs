@@ -260,6 +260,33 @@ async fn handle_ipc_client(
             info!("Aplikasi dimatikan untuk {}", app_name);
             IpcResponse::Success
         }
+        IpcRequest::ChangePassword {
+            old_password,
+            new_password,
+        } => {
+            let mut cfg = config.lock().await;
+            if old_password != cfg.password {
+                warn!("Gagal ubah password: password lama salah");
+                IpcResponse::WrongPassword
+            } else {
+                cfg.password = new_password;
+                let exe_dir = std::env::current_exe()
+                    .unwrap()
+                    .parent()
+                    .expect("Tidak dapat menemukan parent directory")
+                    .to_path_buf();
+                match cfg.save(&exe_dir) {
+                    Ok(_) => {
+                        info!("Password berhasil diubah");
+                        IpcResponse::PasswordChanged
+                    }
+                    Err(e) => {
+                        error!("Gagal menyimpan password baru: {}", e);
+                        IpcResponse::Error(format!("Gagal menyimpan: {}", e))
+                    }
+                }
+            }
+        }
     };
 
     if let Ok(response_bytes) = serde_json::to_vec(&response) {

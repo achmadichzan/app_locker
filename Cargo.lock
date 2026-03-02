@@ -131,7 +131,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "app_core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -879,7 +879,7 @@ checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
 name = "daemon"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "app_core",
@@ -2078,7 +2078,7 @@ dependencies = [
 
 [[package]]
 name = "infra"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "app_core",
@@ -4636,7 +4636,7 @@ dependencies = [
 
 [[package]]
 name = "ui"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "app_core",
  "rfd",
@@ -4956,7 +4956,7 @@ dependencies = [
 
 [[package]]
 name = "watchdog"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "tokio",

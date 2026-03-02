@@ -413,92 +413,104 @@ export component AppPrompt inherits Window {
     no-frame: false;
     background: #1a1a2e;
 
-    VerticalLayout {
-        padding: 28px;
-        spacing: 14px;
-        alignment: center;
-
-        HorizontalLayout {
-            alignment: center;
-            spacing: 10px;
-
-            Text {
-                text: "🔒";
-                font-size: 28px;
-                vertical-alignment: center;
-            }
-            Text {
-                text: "Akses Terkunci";
-                font-size: 22px;
-                font-weight: 800;
-                color: #e8e8f0;
-                vertical-alignment: center;
+    FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Escape {
+                root.cancel-requested();
+                accept
+            } else {
+                reject
             }
         }
 
-        Text {
-            text: target_name + " sedang dibekukan oleh sistem.";
-            font-size: 13px;
-            horizontal-alignment: center;
-            color: #8888aa;
-        }
-
-        input := LineEdit {
-            placeholder-text: "Masukkan Password...";
-            input-type: password;
-            font-size: 14px;
-        }
-
-        Text {
-            text: root.error_msg;
-            color: #ff6b6b;
-            font-size: 12px;
-            horizontal-alignment: center;
-        }
-
-        HorizontalLayout {
-            spacing: 12px;
+        VerticalLayout {
+            padding: 28px;
+            spacing: 14px;
             alignment: center;
 
-            Rectangle {
-                width: 110px;
-                height: 40px;
-                border-radius: 8px;
-                background: cancel-ta.has-hover ? #2a2a44 : #252540;
-                border-color: #3a3a55;
-                border-width: 1px;
-
-                cancel-ta := TouchArea {
-                    clicked => { root.cancel-requested(); }
-                }
+            HorizontalLayout {
+                alignment: center;
+                spacing: 10px;
 
                 Text {
-                    text: "Batal";
-                    font-size: 14px;
-                    font-weight: 600;
-                    color: #aaaacc;
-                    horizontal-alignment: center;
+                    text: "🔒";
+                    font-size: 28px;
+                    vertical-alignment: center;
+                }
+                Text {
+                    text: "Akses Terkunci";
+                    font-size: 22px;
+                    font-weight: 800;
+                    color: #e8e8f0;
                     vertical-alignment: center;
                 }
             }
 
-            Rectangle {
-                width: 140px;
-                height: 40px;
-                border-radius: 8px;
-                background: unlock-ta.has-hover ? #2952a3 : #3b82f6;
+            Text {
+                text: target_name + " sedang dibekukan oleh sistem.";
+                font-size: 13px;
+                horizontal-alignment: center;
+                color: #8888aa;
+            }
 
-                unlock-ta := TouchArea {
-                    clicked => { root.unlock-requested(input.text); }
+            input := LineEdit {
+                placeholder-text: "Masukkan Password...";
+                input-type: password;
+                font-size: 14px;
+                accepted => { root.unlock-requested(self.text); }
+            }
+
+            Text {
+                text: root.error_msg;
+                color: #ff6b6b;
+                font-size: 12px;
+                horizontal-alignment: center;
+            }
+
+            HorizontalLayout {
+                spacing: 12px;
+                alignment: center;
+
+                Rectangle {
+                    width: 110px;
+                    height: 40px;
+                    border-radius: 8px;
+                    background: cancel-ta.has-hover ? #2a2a44 : #252540;
+                    border-color: #3a3a55;
+                    border-width: 1px;
+
+                    cancel-ta := TouchArea {
+                        clicked => { root.cancel-requested(); }
+                    }
+
+                    Text {
+                        text: "Batal";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: #aaaacc;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
 
-                Text {
-                    text: "🔓 Buka Kunci";
-                    font-size: 14px;
-                    font-weight: 700;
-                    color: white;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
+                Rectangle {
+                    width: 140px;
+                    height: 40px;
+                    border-radius: 8px;
+                    background: unlock-ta.has-hover ? #2952a3 : #3b82f6;
+
+                    unlock-ta := TouchArea {
+                        clicked => { root.unlock-requested(input.text); }
+                    }
+
+                    Text {
+                        text: "🔓 Buka Kunci";
+                        font-size: 14px;
+                        font-weight: 700;
+                        color: white;
+                        horizontal-alignment: center;
+                        vertical-alignment: center;
+                    }
                 }
             }
         }

@@ -1,12 +1,12 @@
 #![windows_subsystem = "windows"]
 
-use app_core::{AppConfig, IpcRequest, IpcResponse, PIPE_NAME, ProcessMonitor};
-use infra::WindowsProcessManager;
+use app_core::{AppConfig, IpcRequest, IpcResponse, PIPE_NAME, SERVICE_NAME, SERVICE_DISPLAY_NAME};
 use slint::Model;
-use std::collections::HashSet;
 use std::env;
+use std::ffi::OsString;
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -30,175 +30,168 @@ fn main() -> anyhow::Result<()> {
     let args: Vec<String> = env::args().collect();
 
     match args.get(1).map(|s| s.as_str()) {
-        Some("--daemon") => run_daemon(),
-        Some("--watchdog") => run_watchdog(),
-        Some("--prompt") => {
-            // --prompt <pid> <name>
-            run_lock_prompt(&args[2..]).map_err(|e| anyhow::anyhow!(e))
+        Some("--service") => run_service(),
+        Some("--interceptor") => {
+            let app_path = args.get(2).cloned().unwrap_or_default();
+            let app_name = std::path::Path::new(&app_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown.exe")
+                .to_lowercase();
+            run_interceptor(&app_name, &app_path)
         }
         _ => run_management_panel().map_err(|e| anyhow::anyhow!(e)),
     }
 }
 
-fn run_daemon() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
-    info!("Daemon App Locker menyala...");
+use windows_service::{
+    define_windows_service,
+    service::{
+        ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus,
+        ServiceType,
+    },
+    service_control_handler::{self, ServiceControlHandlerResult},
+    service_dispatcher,
+};
+
+define_windows_service!(ffi_service_main, service_main);
+
+fn run_service() -> anyhow::Result<()> {
+    service_dispatcher::start(SERVICE_NAME, ffi_service_main)
+        .map_err(|e| anyhow::anyhow!("Gagal memulai service dispatcher: {}", e))?;
+    Ok(())
+}
+
+fn service_main(_arguments: Vec<OsString>) {
+    if let Err(e) = run_service_inner() {
+        error!("Service gagal: {}", e);
+    }
+}
+
+fn run_service_inner() -> anyhow::Result<()> {
+    tracing_subscriber::fmt()
+        .with_max_level(Level::INFO)
+        .init();
+    info!("AppLocker Service menyala...");
+
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let shutdown_tx = Arc::new(std::sync::Mutex::new(Some(shutdown_tx)));
+
+    let shutdown_tx_clone = shutdown_tx.clone();
+    let status_handle = service_control_handler::register(
+        SERVICE_NAME,
+        move |control_event| -> ServiceControlHandlerResult {
+            match control_event {
+                ServiceControl::Stop | ServiceControl::Shutdown => {
+                    info!("Menerima sinyal stop/shutdown...");
+                    if let Some(tx) = shutdown_tx_clone.lock().unwrap().take() {
+                        let _ = tx.send(());
+                    }
+                    ServiceControlHandlerResult::NoError
+                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                _ => ServiceControlHandlerResult::NotImplemented,
+            }
+        },
+    )
+    .map_err(|e| anyhow::anyhow!("Gagal register service control handler: {}", e))?;
+
+    status_handle
+        .set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Running,
+            controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })
+        .map_err(|e| anyhow::anyhow!("Gagal set service status: {}", e))?;
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
         let dir = exe_dir();
-        let monitor = Arc::new(WindowsProcessManager::new());
-        let suspended_pids = Arc::new(Mutex::new(HashSet::<u32>::new()));
-        let unlocked_apps = Arc::new(Mutex::new(HashSet::<String>::new()));
-        let prompting_apps = Arc::new(Mutex::new(HashSet::<String>::new()));
+        let self_exe = env::current_exe().expect("Gagal mendapatkan path executable");
+        let interceptor_path = self_exe.to_string_lossy().to_string();
 
         let config = Arc::new(Mutex::new(AppConfig::load(&dir)));
+
         {
             let cfg = config.lock().await;
             info!("Aplikasi terkunci: {:?}", cfg.locked_apps);
+            if let Err(e) = app_core::sync_ifeo_with_config(&cfg, &interceptor_path) {
+                error!("Gagal sinkronisasi IFEO: {}", e);
+            }
         }
-
-        let monitor_ipc = monitor.clone();
-        let pids_ipc = suspended_pids.clone();
-        let unlocked_ipc = unlocked_apps.clone();
-        let prompting_ipc = prompting_apps.clone();
-        let config_ipc = config.clone();
-        tokio::spawn(async move {
-            run_ipc_server(monitor_ipc, pids_ipc, unlocked_ipc, prompting_ipc, config_ipc).await;
-        });
 
         let config_reload = config.clone();
         let dir_reload = dir.clone();
-        let unlocked_reload = unlocked_apps.clone();
-        let monitor_reload = monitor.clone();
-
-        tokio::spawn(async move {
+        let interceptor_reload = interceptor_path.clone();
+        let reload_handle = tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(3)).await;
                 let new_config = AppConfig::load(&dir_reload);
                 let mut cfg = config_reload.lock().await;
 
                 if cfg.locked_apps != new_config.locked_apps {
-                    let  baru_dikunci: Vec<String> = new_config
-                        .locked_apps
-                        .iter()
-                        .filter(|app| !cfg.locked_apps.contains(app))
-                        .map(|s| s.to_lowercase())
-                        .collect();
-
-                    if !baru_dikunci.is_empty() {
-                        let proc_list = monitor_reload.get_running_processes();
-                        let active_names: HashSet<String> = proc_list
-                            .into_iter()
-                            .map(|p| p.name.to_lowercase())
-                            .collect();
-
-                        let mut unlocked = unlocked_reload.lock().await;
-                        for nama in baru_dikunci {
-                            if active_names.contains(&nama) {
-                                unlocked.insert(nama);
-                            }
-                        }
-                    }
-
-                    info!("Config ter-update! Aplikasi terkunci: {:?}", new_config.locked_apps);
+                    info!(
+                        "Config ter-update! Aplikasi terkunci: {:?}",
+                        new_config.locked_apps
+                    );
                     *cfg = new_config;
+                    if let Err(e) = app_core::sync_ifeo_with_config(&cfg, &interceptor_reload) {
+                        error!("Gagal sinkronisasi IFEO setelah reload: {}", e);
+                    }
                 }
             }
         });
 
-        let self_exe = std::env::current_exe().expect("Gagal mendapatkan path executable");
+        let recently_unlocked: Arc<Mutex<std::collections::HashMap<String, tokio::time::Instant>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
 
-        loop {
-            let processes = monitor.get_running_processes();
-            let mut pids_lock = suspended_pids.lock().await;
-            let mut prompting_lock = prompting_apps.lock().await;
+        let config_ipc = config.clone();
+        let interceptor_ipc = interceptor_path.clone();
+        let unlocked_ipc = recently_unlocked.clone();
+        let ipc_handle = tokio::spawn(async move {
+            run_ipc_server(config_ipc, interceptor_ipc, unlocked_ipc).await;
+        });
 
-            let active_apps: HashSet<String> =
-                processes.iter().map(|p| p.name.to_lowercase()).collect();
-            let active_pids: HashSet<u32> = processes.iter().map(|p| p.pid).collect();
+        let _ = shutdown_rx.await;
+        info!("Service menerima sinyal shutdown, membersihkan IFEO...");
 
-            unlocked_apps
-                .lock()
-                .await
-                .retain(|app| active_apps.contains(app));
-            prompting_lock.retain(|app| active_apps.contains(app));
-            pids_lock.retain(|pid| active_pids.contains(pid));
-
-            let target_apps: Vec<String> = config.lock().await.locked_apps.clone();
-
-            for process in processes {
-                let proc_name = process.name.to_lowercase();
-                let pid = process.pid;
-
-                if target_apps.iter().any(|t| t.to_lowercase() == proc_name)
-                    && !pids_lock.contains(&pid)
-                    && !unlocked_apps.lock().await.contains(&proc_name)
-                {
-                    info!("Mencegat aplikasi: {} (PID: {})", process.name, pid);
-
-                    match monitor.suspend_process(pid) {
-                        Ok(_) => {
-                            pids_lock.insert(pid);
-
-                            if !prompting_lock.contains(&proc_name) {
-                                prompting_lock.insert(proc_name.clone());
-
-                                match std::process::Command::new(&self_exe)
-                                    .arg("--prompt")
-                                    .arg(pid.to_string())
-                                    .arg(&proc_name)
-                                    .spawn()
-                                {
-                                    Ok(_) => {
-                                        info!("UI prompt diluncurkan untuk {}", proc_name);
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "Gagal meluncurkan UI: {}. Melepas PID {} kembali.",
-                                            e, pid
-                                        );
-                                        let _ = monitor.resume_process(pid);
-                                        pids_lock.remove(&pid);
-                                        prompting_lock.remove(&proc_name);
-                                    }
-                                }
-                            } else {
-                                info!(
-                                    "Aplikasi {} (PID: {}) ditangguhkan (menunggu prompt selesai)",
-                                    proc_name, pid
-                                );
-                            }
-                        }
-                        Err(e) => {
-                            error!(
-                                "Gagal menangguhkan {} (PID: {}): {}. Kemungkinan butuh akses Administrator.",
-                                proc_name, pid, e
-                            );
-                            pids_lock.insert(pid);
-                        }
-                    }
-                }
-            }
-
-            drop(pids_lock);
-            drop(prompting_lock);
-            sleep(Duration::from_millis(150)).await;
+        if let Err(e) = app_core::remove_all_ifeo(&interceptor_path) {
+            error!("Gagal membersihkan IFEO: {}", e);
         }
-    })
+
+        reload_handle.abort();
+        ipc_handle.abort();
+    });
+
+    status_handle
+        .set_service_status(ServiceStatus {
+            service_type: ServiceType::OWN_PROCESS,
+            current_state: ServiceState::Stopped,
+            controls_accepted: ServiceControlAccept::empty(),
+            exit_code: ServiceExitCode::Win32(0),
+            checkpoint: 0,
+            wait_hint: Duration::default(),
+            process_id: None,
+        })
+        .ok();
+
+    info!("AppLocker Service berhenti.");
+    Ok(())
 }
 
 async fn run_ipc_server(
-    monitor: Arc<WindowsProcessManager>,
-    suspended_pids: Arc<Mutex<HashSet<u32>>>,
-    unlocked_apps: Arc<Mutex<HashSet<String>>>,
-    prompting_apps: Arc<Mutex<HashSet<String>>>,
     config: Arc<Mutex<AppConfig>>,
+    interceptor_path: String,
+    recently_unlocked: Arc<Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
 ) {
     info!("IPC Server mendengarkan di {}", PIPE_NAME);
 
     loop {
-        let mut server = match ServerOptions::new().create(PIPE_NAME) {
+        let mut server = match create_open_pipe() {
             Ok(s) => s,
             Err(e) => {
                 error!("Gagal membuat Named Pipe: {}", e);
@@ -211,36 +204,76 @@ async fn run_ipc_server(
             continue;
         }
 
-        info!("UI Client terhubung ke pipe!");
+        info!("Client terhubung ke pipe!");
 
-        let monitor_clone = monitor.clone();
-        let pids_clone = suspended_pids.clone();
-        let unlocked_clone = unlocked_apps.clone();
-        let prompting_clone = prompting_apps.clone();
         let config_clone = config.clone();
+        let interceptor_clone = interceptor_path.clone();
+        let unlocked_clone = recently_unlocked.clone();
         tokio::spawn(async move {
-            handle_ipc_client(
-                &mut server,
-                monitor_clone,
-                pids_clone,
-                unlocked_clone,
-                prompting_clone,
-                config_clone,
-            )
-            .await;
+            handle_ipc_client(&mut server, config_clone, interceptor_clone, unlocked_clone).await;
         });
+    }
+}
+
+fn create_open_pipe() -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
+    use std::ffi::c_void;
+
+    #[repr(C)]
+    struct SECURITY_DESCRIPTOR {
+        revision: u8,
+        sbz1: u8,
+        control: u16,
+        owner: *mut c_void,
+        group: *mut c_void,
+        sacl: *mut c_void,
+        dacl: *mut c_void,
+    }
+
+    #[repr(C)]
+    struct SECURITY_ATTRIBUTES {
+        n_length: u32,
+        lp_security_descriptor: *mut c_void,
+        b_inherit_handle: i32,
+    }
+
+    unsafe extern "system" {
+        fn InitializeSecurityDescriptor(sd: *mut SECURITY_DESCRIPTOR, rev: u32) -> i32;
+        fn SetSecurityDescriptorDacl(
+            sd: *mut SECURITY_DESCRIPTOR,
+            present: i32,
+            dacl: *mut c_void,
+            defaulted: i32,
+        ) -> i32;
+    }
+
+    unsafe {
+        let mut sd: SECURITY_DESCRIPTOR = std::mem::zeroed();
+        InitializeSecurityDescriptor(&mut sd, 1);
+        SetSecurityDescriptorDacl(&mut sd, 1, std::ptr::null_mut(), 0);
+
+        let mut sa = SECURITY_ATTRIBUTES {
+            n_length: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lp_security_descriptor: &mut sd as *mut _ as *mut c_void,
+            b_inherit_handle: 0,
+        };
+
+        ServerOptions::new()
+            .access_inbound(true)
+            .access_outbound(true)
+            .create_with_security_attributes_raw(
+                PIPE_NAME,
+                &mut sa as *mut _ as *mut c_void,
+            )
     }
 }
 
 async fn handle_ipc_client(
     server: &mut tokio::net::windows::named_pipe::NamedPipeServer,
-    monitor: Arc<WindowsProcessManager>,
-    suspended_pids: Arc<Mutex<HashSet<u32>>>,
-    unlocked_apps: Arc<Mutex<HashSet<String>>>,
-    prompting_apps: Arc<Mutex<HashSet<String>>>,
     config: Arc<Mutex<AppConfig>>,
+    interceptor_path: String,
+    recently_unlocked: Arc<Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
 ) {
-    let mut buffer = vec![0u8; 1024];
+    let mut buffer = vec![0u8; 4096];
     let bytes_read = match server.read(&mut buffer).await {
         Ok(0) => return,
         Ok(n) => n,
@@ -256,50 +289,53 @@ async fn handle_ipc_client(
     };
 
     let response = match request {
-        IpcRequest::UnlockApp { app_name, password } => {
+        IpcRequest::LaunchApp { app_name, app_path: _, password } => {
             let cfg = config.lock().await;
 
-            if password == cfg.password {
-                unlocked_apps.lock().await.insert(app_name.clone());
-                prompting_apps.lock().await.remove(&app_name);
+            let auto_approved = {
+                let unlocked = recently_unlocked.lock().await;
+                if let Some(unlock_time) = unlocked.get(&app_name) {
+                    unlock_time.elapsed() < Duration::from_secs(30)
+                } else {
+                    false
+                }
+            };
 
-                let processes = monitor.get_running_processes();
-                for p in processes {
-                    if p.name.to_lowercase() == app_name.to_lowercase() {
-                        let mut lock = suspended_pids.lock().await;
-                        if lock.contains(&p.pid) {
-                            let _ = monitor.resume_process(p.pid);
-                            lock.remove(&p.pid);
-                        }
-                    }
+            if auto_approved || password == cfg.password {
+                if auto_approved {
+                    info!("Auto-approve untuk {} (child process dalam 30 detik)", app_name);
+                } else {
+                    info!("Password benar untuk {}. Menghapus IFEO sementara...", app_name);
                 }
 
-                info!("Aplikasi dilepaskan untuk {}", app_name);
-                IpcResponse::Success
+                {
+                    let mut unlocked = recently_unlocked.lock().await;
+                    unlocked.insert(app_name.clone(), tokio::time::Instant::now());
+                }
+                if let Err(e) = app_core::remove_ifeo(&app_name) {
+                    error!("Gagal menghapus IFEO sementara untuk {}: {}", app_name, e);
+                    IpcResponse::Error(format!("Gagal menghapus IFEO: {}", e))
+                } else {
+                    let app_name_clone = app_name.clone();
+                    let interceptor_clone = interceptor_path.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        if let Err(e) = app_core::set_ifeo(&app_name_clone, &interceptor_clone) {
+                            error!("Gagal memasang kembali IFEO untuk {}: {}", app_name_clone, e);
+                        } else {
+                            info!("IFEO dipasang kembali untuk {}", app_name_clone);
+                        }
+                    });
+
+                    IpcResponse::Success
+                }
             } else {
                 warn!("Password salah untuk {}", app_name);
                 IpcResponse::WrongPassword
             }
         }
-        IpcRequest::CancelUnlock { app_name } => {
-            let processes = monitor.get_running_processes();
-            let mut pids_to_kill = Vec::new();
-
-            for p in processes {
-                if p.name.to_lowercase() == app_name.to_lowercase() {
-                    let lock = suspended_pids.lock().await;
-                    if lock.contains(&p.pid) {
-                        pids_to_kill.push(p.pid);
-                    }
-                }
-            }
-
-            for pid in pids_to_kill {
-                let _ = monitor.kill_process(pid);
-            }
-
-            prompting_apps.lock().await.remove(&app_name);
-            info!("Aplikasi dimatikan untuk {}", app_name);
+        IpcRequest::CancelLaunch { app_name } => {
+            info!("Peluncuran dibatalkan untuk {}", app_name);
             IpcResponse::Success
         }
         IpcRequest::ChangePassword {
@@ -331,44 +367,55 @@ async fn handle_ipc_client(
     }
 }
 
-fn run_watchdog() -> anyhow::Result<()> {
-    tracing_subscriber::fmt().with_max_level(Level::INFO).init();
-    info!("Watchdog App Locker menyala...");
+fn run_interceptor(app_name: &str, app_path: &str) -> anyhow::Result<()> {
+    let ui = AppPrompt::new().map_err(|e| anyhow::anyhow!(e))?;
+    ui.set_target_name(app_name.into());
+    center_window(ui.window(), 380.0, 260.0);
 
-    let rt = tokio::runtime::Runtime::new()?;
-    rt.block_on(async {
-        let self_exe = std::env::current_exe().expect("Gagal mendapatkan path executable");
-
-        const RESTART_DELAY: Duration = Duration::from_secs(2);
-
-        loop {
-            info!("Memulai daemon: {:?} --daemon", self_exe);
-
-            let status = tokio::process::Command::new(&self_exe)
-                .arg("--daemon")
-                .status()
-                .await;
-
-            match status {
-                Ok(exit_status) => {
-                    warn!(
-                        "Daemon berhenti dengan kode: {:?}. Restart dalam {} detik...",
-                        exit_status.code(),
-                        RESTART_DELAY.as_secs()
-                    );
-                }
-                Err(e) => {
-                    error!(
-                        "Gagal menjalankan daemon: {}. Retry dalam {} detik...",
-                        e,
-                        RESTART_DELAY.as_secs()
-                    );
-                }
-            }
-
-            sleep(RESTART_DELAY).await;
+    let ui_weak = ui.as_weak();
+    let app_name_cancel = app_name.to_string();
+    ui.on_cancel_requested(move || {
+        let _ = send_ipc_request(IpcRequest::CancelLaunch {
+            app_name: app_name_cancel.clone(),
+        });
+        if let Some(ui) = ui_weak.upgrade() {
+            let _ = ui.hide();
         }
-    })
+    });
+
+    let ui_weak = ui.as_weak();
+    let app_name_unlock = app_name.to_string();
+    let app_path_unlock = app_path.to_string();
+    ui.on_unlock_requested(move |password| {
+        let Some(ui) = ui_weak.upgrade() else {
+            return;
+        };
+
+        let request = IpcRequest::LaunchApp {
+            app_name: app_name_unlock.clone(),
+            app_path: app_path_unlock.clone(),
+            password: password.to_string(),
+        };
+
+        match send_ipc_request(request) {
+            Ok(IpcResponse::Success) => {
+                let _ = std::process::Command::new(&app_path_unlock)
+                    .spawn();
+                let _ = ui.hide();
+            }
+            Ok(IpcResponse::WrongPassword) => {
+                ui.set_error_msg("Password salah! Coba lagi.".into());
+            }
+            Ok(other) => {
+                ui.set_error_msg(format!("Error: {:?}", other).into());
+            }
+            Err(e) => {
+                ui.set_error_msg(format!("Gagal: {}", e).into());
+            }
+        }
+    });
+
+    ui.run().map_err(|e| anyhow::anyhow!(e))
 }
 
 fn run_management_panel() -> Result<(), slint::PlatformError> {
@@ -378,7 +425,7 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
     let config = AppConfig::load(&exe_dir());
     refresh_app_list(&ui, &config);
 
-    let is_active = is_daemon_running();
+    let is_active = is_service_running();
     ui.set_protection_active(is_active);
 
     let ui_weak = ui.as_weak();
@@ -445,40 +492,6 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
     });
 
     let ui_weak = ui.as_weak();
-    ui.on_fetch_running_apps(move || {
-        let mut sys = sysinfo::System::new_all();
-        sys.refresh_processes();
-
-        let mut app_names: Vec<String> = sys
-            .processes()
-            .values()
-            .map(|p| p.name().to_string())
-            .filter(|name: &String| name.to_lowercase().ends_with(".exe"))
-            .collect();
-
-        app_names.sort();
-        app_names.dedup();
-
-        if let Some(ui) = ui_weak.upgrade() {
-            let model = std::rc::Rc::new(slint::VecModel::from(
-                app_names
-                    .into_iter()
-                    .map(slint::SharedString::from)
-                    .collect::<Vec<_>>(),
-            ));
-            ui.set_running_apps(model.into());
-            ui.set_show_running_apps(!ui.get_show_running_apps());
-        }
-    });
-
-    let ui_weak = ui.as_weak();
-    ui.on_select_running_app(move |app_name| {
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_new_app_name(app_name);
-        }
-    });
-
-    let ui_weak = ui.as_weak();
     ui.on_save_config(move || {
         let ui = ui_weak.unwrap();
         let apps = model_to_vec(&ui.get_apps());
@@ -523,42 +536,23 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
         };
 
         match send_ipc_request(request) {
-            Some(IpcResponse::PasswordChanged) => {
+            Ok(IpcResponse::PasswordChanged) => {
                 ui.set_password_status_msg("✅ Password berhasil diubah!".into());
                 ui.set_old_password("".into());
                 ui.set_new_password("".into());
                 ui.set_confirm_password("".into());
             }
-            Some(IpcResponse::WrongPassword) => {
+            Ok(IpcResponse::WrongPassword) => {
                 ui.set_password_status_msg("Password lama salah!".into());
             }
-            Some(IpcResponse::Error(e)) => {
+            Ok(IpcResponse::Error(e)) => {
+                ui.set_password_status_msg(format!("Gagal: {}", e).into());
+            }
+            Err(e) => {
                 ui.set_password_status_msg(format!("Gagal: {}", e).into());
             }
             _ => {
-                ui.set_password_status_msg("Gagal terhubung ke daemon.".into());
-            }
-        }
-    });
-
-    ui.set_startup_enabled(app_core::is_startup_enabled());
-
-    let ui_weak = ui.as_weak();
-    ui.on_toggle_startup(move || {
-        let ui = ui_weak.unwrap();
-        let new_state = !ui.get_startup_enabled();
-
-        match app_core::set_startup_enabled(new_state) {
-            Ok(_) => {
-                ui.set_startup_enabled(new_state);
-                if new_state {
-                    ui.set_startup_status_msg("✅ Startup diaktifkan!".into());
-                } else {
-                    ui.set_startup_status_msg("✅ Startup dinonaktifkan.".into());
-                }
-            }
-            Err(e) => {
-                ui.set_startup_status_msg(format!("❌ Gagal: {}", e).into());
+                ui.set_password_status_msg("Gagal terhubung ke service.".into());
             }
         }
     });
@@ -569,14 +563,20 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
         let currently_active = ui.get_protection_active();
 
         if currently_active {
-            stop_protection();
-            ui.set_protection_active(false);
-            ui.set_protection_status_msg("✅ Proteksi dinonaktifkan.".into());
+            match stop_service() {
+                Ok(_) => {
+                    ui.set_protection_active(false);
+                    ui.set_protection_status_msg("✅ Service dihentikan.".into());
+                }
+                Err(e) => {
+                    ui.set_protection_status_msg(format!("❌ Gagal: {}", e).into());
+                }
+            }
         } else {
-            match start_protection() {
+            match start_service() {
                 Ok(_) => {
                     ui.set_protection_active(true);
-                    ui.set_protection_status_msg("✅ Proteksi diaktifkan!".into());
+                    ui.set_protection_status_msg("✅ Service dimulai!".into());
                 }
                 Err(e) => {
                     ui.set_protection_status_msg(format!("❌ Gagal: {}", e).into());
@@ -588,109 +588,180 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
     let ui_weak = ui.as_weak();
     ui.on_check_protection_status(move || {
         if let Some(ui) = ui_weak.upgrade() {
-            ui.set_protection_active(is_daemon_running());
+            ui.set_protection_active(is_service_running());
         }
     });
+
+    let ui_weak = ui.as_weak();
+    ui.on_install_service(move || {
+        let ui = ui_weak.unwrap();
+        match install_service() {
+            Ok(_) => {
+                ui.set_service_installed(true);
+                ui.set_protection_status_msg("✅ Service berhasil diinstall!".into());
+                // Auto-start setelah install
+                if let Ok(_) = start_service() {
+                    ui.set_protection_active(true);
+                }
+            }
+            Err(e) => {
+                ui.set_protection_status_msg(format!("❌ Gagal install: {}", e).into());
+            }
+        }
+    });
+
+    let ui_weak = ui.as_weak();
+    ui.on_uninstall_service(move || {
+        let ui = ui_weak.unwrap();
+        let _ = stop_service();
+        match uninstall_service() {
+            Ok(_) => {
+                ui.set_service_installed(false);
+                ui.set_protection_active(false);
+                ui.set_protection_status_msg("✅ Service berhasil di-uninstall.".into());
+            }
+            Err(e) => {
+                ui.set_protection_status_msg(format!("❌ Gagal uninstall: {}", e).into());
+            }
+        }
+    });
+
+    ui.set_service_installed(is_service_installed());
 
     ui.run()
 }
 
-fn start_protection() -> anyhow::Result<()> {
-    let self_exe = std::env::current_exe()?;
+fn install_service() -> anyhow::Result<()> {
+    let self_exe = env::current_exe()?;
+    let bin_path = format!("\"{}\" --service", self_exe.to_string_lossy());
 
-    std::process::Command::new(&self_exe)
-        .arg("--watchdog")
+    let output = std::process::Command::new("sc.exe")
+        .arg("create")
+        .arg(SERVICE_NAME)
+        .arg("binPath=")
+        .arg(&bin_path)
+        .arg("DisplayName=")
+        .arg(SERVICE_DISPLAY_NAME)
+        .arg("start=")
+        .arg("auto")
         .creation_flags(0x08000000)
-        .spawn()
-        .map_err(|e| anyhow::anyhow!("Gagal memulai watchdog: {}", e))?;
+        .output()
+        .map_err(|e| anyhow::anyhow!("Gagal menjalankan sc.exe create: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(anyhow::anyhow!(
+            "sc.exe create gagal: {} {}",
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+
+    let _ = std::process::Command::new("sc.exe")
+        .arg("failure")
+        .arg(SERVICE_NAME)
+        .arg("reset=")
+        .arg("86400")
+        .arg("actions=")
+        .arg("restart/5000/restart/10000/restart/30000")
+        .creation_flags(0x08000000)
+        .output();
+
+    info!("Service berhasil diinstall");
+    Ok(())
+}
+
+fn uninstall_service() -> anyhow::Result<()> {
+    let self_exe = env::current_exe()?;
+    let interceptor_path = self_exe.to_string_lossy().to_string();
+    app_core::remove_all_ifeo(&interceptor_path).ok();
+
+    let output = std::process::Command::new("sc.exe")
+        .args(["delete", SERVICE_NAME])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| anyhow::anyhow!("Gagal menjalankan sc.exe delete: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(anyhow::anyhow!(
+            "sc.exe delete gagal: {} {}",
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
+
+    info!("Service berhasil di-uninstall");
+    Ok(())
+}
+
+fn start_service() -> anyhow::Result<()> {
+    let output = std::process::Command::new("sc.exe")
+        .args(["start", SERVICE_NAME])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| anyhow::anyhow!("Gagal menjalankan sc.exe start: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(anyhow::anyhow!(
+            "sc.exe start gagal: {} {}",
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
 
     Ok(())
 }
 
-fn stop_protection() {
-    let current_pid = std::process::id();
-    let mut sys = sysinfo::System::new_all();
-    sys.refresh_processes();
+fn stop_service() -> anyhow::Result<()> {
+    let output = std::process::Command::new("sc.exe")
+        .args(["stop", SERVICE_NAME])
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| anyhow::anyhow!("Gagal menjalankan sc.exe stop: {}", e))?;
 
-    let self_name = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase().to_string()))
-        .unwrap_or_default();
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(anyhow::anyhow!(
+            "sc.exe stop gagal: {} {}",
+            stdout.trim(),
+            stderr.trim()
+        ));
+    }
 
-    for (pid, process) in sys.processes() {
-        if pid.as_u32() != current_pid && process.name().to_lowercase() == self_name {
-            process.kill();
+    Ok(())
+}
+
+fn is_service_running() -> bool {
+    let output = std::process::Command::new("sc.exe")
+        .args(["query", SERVICE_NAME])
+        .creation_flags(0x08000000)
+        .output();
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            stdout.contains("RUNNING")
         }
+        Err(_) => false,
     }
 }
 
-fn is_daemon_running() -> bool {
-    let current_pid = std::process::id();
-    let mut sys = sysinfo::System::new_all();
-    sys.refresh_processes();
+fn is_service_installed() -> bool {
+    let output = std::process::Command::new("sc.exe")
+        .args(["query", SERVICE_NAME])
+        .creation_flags(0x08000000)
+        .output();
 
-    let self_name = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase().to_string()))
-        .unwrap_or_default();
-
-    for (pid, process) in sys.processes() {
-        if pid.as_u32() != current_pid && process.name().to_lowercase() == self_name {
-            return true;
-        }
+    match output {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
     }
-
-    false
-}
-
-fn run_lock_prompt(args: &[String]) -> Result<(), slint::PlatformError> {
-    let _target_pid: u32 = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-    let target_name = args
-        .get(1)
-        .cloned()
-        .unwrap_or_else(|| "Aplikasi".to_string());
-
-    let ui = AppPrompt::new()?;
-    ui.set_target_name(target_name.clone().into());
-    center_window(ui.window(), 380.0, 260.0);
-
-    let ui_weak = ui.as_weak();
-    let target_name_cancel = target_name.clone();
-    ui.on_cancel_requested(move || {
-        send_ipc_request(IpcRequest::CancelUnlock {
-            app_name: target_name_cancel.clone(),
-        });
-        if let Some(ui) = ui_weak.upgrade() {
-            let _ = ui.hide();
-        }
-    });
-
-    let ui_weak = ui.as_weak();
-    let target_name_unlock = target_name.clone();
-    ui.on_unlock_requested(move |password| {
-        let Some(ui) = ui_weak.upgrade() else {
-            return;
-        };
-
-        let request = IpcRequest::UnlockApp {
-            app_name: target_name_unlock.clone(),
-            password: password.to_string(),
-        };
-
-        match send_ipc_request(request) {
-            Some(IpcResponse::Success) => {
-                let _ = ui.hide();
-            }
-            Some(IpcResponse::WrongPassword) => {
-                ui.set_error_msg("Password salah! Coba lagi.".into());
-            }
-            _ => {
-                ui.set_error_msg("Gagal terhubung ke sistem keamanan.".into());
-            }
-        }
-    });
-
-    ui.run()
 }
 
 #[cfg(target_os = "windows")]
@@ -733,20 +804,23 @@ fn refresh_app_list(ui: &ManagementPanel, config: &AppConfig) {
     ui.set_apps(model.into());
 }
 
-fn send_ipc_request(request: IpcRequest) -> Option<IpcResponse> {
-    let payload = serde_json::to_vec(&request).ok()?;
+fn send_ipc_request(request: IpcRequest) -> Result<IpcResponse, String> {
+    let payload = serde_json::to_vec(&request)
+        .map_err(|e| format!("Serialize error: {}", e))?;
 
     let mut pipe = OpenOptions::new()
         .read(true)
         .write(true)
         .open(PIPE_NAME)
-        .ok()?;
+        .map_err(|e| format!("Pipe open error: {}", e))?;
 
-    pipe.write_all(&payload).ok()?;
+    pipe.write_all(&payload)
+        .map_err(|e| format!("Pipe write error: {}", e))?;
 
-    let mut buffer = vec![0u8; 512];
-    let bytes_read = pipe.read(&mut buffer).ok()?;
-    serde_json::from_slice(&buffer[..bytes_read]).ok()
+    let mut buffer = vec![0u8; 4096];
+    let bytes_read = pipe.read(&mut buffer)
+        .map_err(|e| format!("Pipe read error: {}", e))?;
+
+    serde_json::from_slice(&buffer[..bytes_read])
+        .map_err(|e| format!("Deserialize error: {}", e))
 }
-
-use std::os::windows::process::CommandExt;

@@ -18,10 +18,10 @@ if (Test-Path -Path $SourcePath) {
     Copy-Item -Path $SourcePath -Destination "$OutputDir\app_locker.exe" -Force
 }
 
-Write-Host "🚀 Menjalankan Daemon di terminal..." -ForegroundColor Green
-Write-Host "Tekan Ctrl+C untuk menghentikan Daemon." -ForegroundColor DarkGray
+Write-Host "🚀 Menjalankan Management Panel..." -ForegroundColor Green
+Write-Host "Catatan: Untuk install service, jalankan sebagai Administrator." -ForegroundColor DarkGray
 Write-Host "-------------------------------------------------"
 
-# 4. Pindah ke folder debug_bin dan jalankan daemon
+# 4. Pindah ke folder debug_bin dan jalankan Management Panel
 Set-Location -Path $OutputDir
-.\app_locker.exe --daemon
+.\app_locker.exe

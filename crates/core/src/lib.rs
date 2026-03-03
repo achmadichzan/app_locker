@@ -2,24 +2,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-pub trait ProcessMonitor: Send + Sync {
-    fn get_running_processes(&self) -> Vec<ProcessInfo>;
-    fn suspend_process(&self, pid: u32) -> Result<()>;
-    fn resume_process(&self, pid: u32) -> Result<()>;
-    fn kill_process(&self, pid: u32) -> Result<()>;
-
-    fn close_process_gracefully(&self, pid: u32) -> Result<()>;
-}
-
-#[derive(Debug, Clone)]
-pub struct ProcessInfo {
-    pub pid: u32,
-    pub name: String,
-}
-
 pub const PIPE_NAME: &str = r"\\.\pipe\applocker_pipe";
-
 pub const CONFIG_FILENAME: &str = "config.json";
+pub const SERVICE_NAME: &str = "AppLockerService";
+pub const SERVICE_DISPLAY_NAME: &str = "App Locker Protection Service";
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
@@ -31,7 +17,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             locked_apps: vec![],
-            password: "".to_string(),
+            password: "123".to_string(),
         }
     }
 }
@@ -58,8 +44,8 @@ impl AppConfig {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum IpcRequest {
-    UnlockApp { app_name: String, password: String },
-    CancelUnlock { app_name: String },
+    LaunchApp { app_name: String, app_path: String, password: String },
+    CancelLaunch { app_name: String },
     ChangePassword {
         old_password: String,
         new_password: String,
@@ -74,38 +60,92 @@ pub enum IpcResponse {
     Error(String),
 }
 
-const REGISTRY_KEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
-const REGISTRY_VALUE_NAME: &str = "AppLocker";
+const IFEO_BASE_KEY: &str =
+    r"SOFTWARE\Microsoft\Windows NT\CurrentVersion\Image File Execution Options";
 
 #[cfg(target_os = "windows")]
-pub fn is_startup_enabled() -> bool {
+pub fn set_ifeo(app_name: &str, interceptor_path: &str) -> Result<()> {
     use winreg::enums::*;
     use winreg::RegKey;
 
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
-    if let Ok(key) = hkcu.open_subkey(REGISTRY_KEY) {
-        key.get_value::<String, _>(REGISTRY_VALUE_NAME).is_ok()
-    } else {
-        false
-    }
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let subkey = format!("{}\\{}", IFEO_BASE_KEY, app_name);
+    let (key, _) = hklm.create_subkey(&subkey)?;
+
+    let debugger_value = format!("\"{}\" --interceptor", interceptor_path);
+    key.set_value("Debugger", &debugger_value)?;
+
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
-pub fn set_startup_enabled(enabled: bool) -> Result<()> {
+pub fn remove_ifeo(app_name: &str) -> Result<()> {
     use winreg::enums::*;
     use winreg::RegKey;
 
-    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    let base_key = hklm.open_subkey_with_flags(IFEO_BASE_KEY, KEY_WRITE)?;
+    base_key.delete_subkey_all(app_name).ok();
 
-    if enabled {
-        let exe_path = std::env::current_exe()?;
-        let startup_command = format!("\"{}\" --watchdog", exe_path.to_string_lossy());
+    Ok(())
+}
 
-        let (key, _) = hkcu.create_subkey(REGISTRY_KEY)?;
-        key.set_value(REGISTRY_VALUE_NAME, &startup_command)?;
-    } else {
-        let key = hkcu.open_subkey_with_flags(REGISTRY_KEY, KEY_WRITE)?;
-        key.delete_value(REGISTRY_VALUE_NAME).ok();
+#[cfg(target_os = "windows")]
+pub fn sync_ifeo_with_config(config: &AppConfig, interceptor_path: &str) -> Result<()> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+
+    for app in &config.locked_apps {
+        if let Err(e) = set_ifeo(app, interceptor_path) {
+            tracing::warn!("Gagal memasang IFEO untuk {}: {}", app, e);
+        } else {
+            tracing::info!("IFEO terpasang untuk: {}", app);
+        }
+    }
+
+    if let Ok(base_key) = hklm.open_subkey_with_flags(IFEO_BASE_KEY, KEY_READ) {
+        for subkey_name in base_key.enum_keys().flatten() {
+            if let Ok(subkey) = base_key.open_subkey(&subkey_name) {
+                if let Ok(debugger_val) = subkey.get_value::<String, _>("Debugger") {
+                    if debugger_val.contains("--interceptor") && debugger_val.contains(interceptor_path) {
+                        let is_still_locked = config
+                            .locked_apps
+                            .iter()
+                            .any(|a| a.to_lowercase() == subkey_name.to_lowercase());
+
+                        if !is_still_locked {
+                            tracing::info!("Menghapus IFEO tidak terpakai: {}", subkey_name);
+                            remove_ifeo(&subkey_name).ok();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+pub fn remove_all_ifeo(interceptor_path: &str) -> Result<()> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let hklm = RegKey::predef(HKEY_LOCAL_MACHINE);
+    if let Ok(base_key) = hklm.open_subkey_with_flags(IFEO_BASE_KEY, KEY_READ) {
+        let subkeys: Vec<String> = base_key.enum_keys().flatten().collect();
+        for subkey_name in subkeys {
+            if let Ok(subkey) = base_key.open_subkey(&subkey_name) {
+                if let Ok(debugger_val) = subkey.get_value::<String, _>("Debugger") {
+                    if debugger_val.contains("--interceptor") && debugger_val.contains(interceptor_path) {
+                        tracing::info!("Membersihkan IFEO: {}", subkey_name);
+                        remove_ifeo(&subkey_name).ok();
+                    }
+                }
+            }
+        }
     }
 
     Ok(())

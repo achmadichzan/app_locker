@@ -1,7 +1,4 @@
 use anyhow::{Result, anyhow};
-use app_core::{ProcessInfo, ProcessMonitor};
-use std::sync::{Arc, Mutex};
-use sysinfo::System;
 
 use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM};
 use windows::Win32::System::Threading::{
@@ -32,7 +29,6 @@ fn load_ntdll_fn(name: &str) -> Result<NtSuspendResumeProcess> {
 }
 
 pub struct WindowsProcessManager {
-    system: Arc<Mutex<System>>,
     nt_suspend: NtSuspendResumeProcess,
     nt_resume: NtSuspendResumeProcess,
 }
@@ -43,34 +39,12 @@ unsafe impl Sync for WindowsProcessManager {}
 impl WindowsProcessManager {
     pub fn new() -> Self {
         Self {
-            system: Arc::new(Mutex::new(System::new_all())),
             nt_suspend: load_ntdll_fn("NtSuspendProcess").expect("Gagal load NtSuspendProcess"),
             nt_resume: load_ntdll_fn("NtResumeProcess").expect("Gagal load NtResumeProcess"),
         }
     }
-}
 
-impl Default for WindowsProcessManager {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl ProcessMonitor for WindowsProcessManager {
-    fn get_running_processes(&self) -> Vec<ProcessInfo> {
-        let mut sys = self.system.lock().unwrap();
-        sys.refresh_processes();
-
-        sys.processes()
-            .iter()
-            .map(|(pid, process)| ProcessInfo {
-                pid: pid.as_u32(),
-                name: process.name().to_string(),
-            })
-            .collect()
-    }
-
-    fn kill_process(&self, pid: u32) -> Result<()> {
+    pub fn kill_process(&self, pid: u32) -> Result<()> {
         let _ = self.resume_process(pid);
 
         unsafe {
@@ -84,7 +58,7 @@ impl ProcessMonitor for WindowsProcessManager {
         }
     }
 
-    fn suspend_process(&self, pid: u32) -> Result<()> {
+    pub fn suspend_process(&self, pid: u32) -> Result<()> {
         unsafe {
             let handle = OpenProcess(PROCESS_SUSPEND_RESUME, false, pid)
                 .map_err(|e| anyhow!("Gagal membuka proses {}: {}", pid, e))?;
@@ -103,7 +77,7 @@ impl ProcessMonitor for WindowsProcessManager {
         }
     }
 
-    fn resume_process(&self, pid: u32) -> Result<()> {
+    pub fn resume_process(&self, pid: u32) -> Result<()> {
         unsafe {
             let handle = OpenProcess(PROCESS_SUSPEND_RESUME, false, pid)
                 .map_err(|e| anyhow!("Gagal membuka proses {}: {}", pid, e))?;
@@ -122,7 +96,7 @@ impl ProcessMonitor for WindowsProcessManager {
         }
     }
 
-    fn close_process_gracefully(&self, pid: u32) -> Result<()> {
+    pub fn close_process_gracefully(&self, pid: u32) -> Result<()> {
         self.resume_process(pid)?;
 
         unsafe {
@@ -131,6 +105,12 @@ impl ProcessMonitor for WindowsProcessManager {
         }
 
         Ok(())
+    }
+}
+
+impl Default for WindowsProcessManager {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

@@ -31,7 +31,7 @@ export component ManagementPanel inherits Window {
 
     title: "App Locker";
     width: 480px;
-    height: 520px;
+    height: 560px;
     background: #1a1a2e;
 
     ScrollView {
@@ -58,7 +58,7 @@ export component ManagementPanel inherits Window {
             }
 
             Text {
-                text: "Pilih aplikasi yang ingin dikunci";
+                text: "Tambah aplikasi yang ingin dikunci";
                 font-size: 13px;
                 color: #8888aa;
                 horizontal-alignment: center;
@@ -303,6 +303,7 @@ export component ManagementPanel inherits Window {
                 font-size: 12px;
                 color: root.protection-status-msg == "✅ Service dimulai!" || root.protection-status-msg == "✅ Service dihentikan." || root.protection-status-msg == "✅ Service berhasil diinstall!" || root.protection-status-msg == "✅ Service berhasil di-uninstall." ? #16a34a : #ff6b6b;
                 horizontal-alignment: center;
+                wrap: word-wrap;
             }
 
             Rectangle {

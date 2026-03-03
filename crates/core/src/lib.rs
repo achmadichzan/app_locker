@@ -17,7 +17,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             locked_apps: vec![],
-            password: "123".to_string(),
+            password: "admin".to_string(),
         }
     }
 }

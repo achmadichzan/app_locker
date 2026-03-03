@@ -407,10 +407,14 @@ fn run_interceptor(app_name: &str, app_path: &str) -> anyhow::Result<()> {
                 ui.set_error_msg("Password salah! Coba lagi.".into());
             }
             Ok(other) => {
-                ui.set_error_msg(format!("Error: {:?}", other).into());
+                ui.set_error_msg(format!("Terjadi kesalahan: {:?}", other).into());
             }
             Err(e) => {
-                ui.set_error_msg(format!("Gagal: {}", e).into());
+                if e.contains("Pipe open error") {
+                    ui.set_error_msg("Service tidak berjalan. Aplikasi tetap terkunci.".into());
+                } else {
+                    ui.set_error_msg(format!("Gagal: {}", e).into());
+                }
             }
         }
     });
@@ -569,7 +573,7 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
                     ui.set_protection_status_msg("✅ Service dihentikan.".into());
                 }
                 Err(e) => {
-                    ui.set_protection_status_msg(format!("❌ Gagal: {}", e).into());
+                    ui.set_protection_status_msg(format!("❌ {}", e).into());
                 }
             }
         } else {
@@ -579,7 +583,7 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
                     ui.set_protection_status_msg("✅ Service dimulai!".into());
                 }
                 Err(e) => {
-                    ui.set_protection_status_msg(format!("❌ Gagal: {}", e).into());
+                    ui.set_protection_status_msg(format!("❌ {}", e).into());
                 }
             }
         }
@@ -599,13 +603,12 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
             Ok(_) => {
                 ui.set_service_installed(true);
                 ui.set_protection_status_msg("✅ Service berhasil diinstall!".into());
-                // Auto-start setelah install
                 if let Ok(_) = start_service() {
                     ui.set_protection_active(true);
                 }
             }
             Err(e) => {
-                ui.set_protection_status_msg(format!("❌ Gagal install: {}", e).into());
+                ui.set_protection_status_msg(format!("❌ {}", e).into());
             }
         }
     });
@@ -621,7 +624,7 @@ fn run_management_panel() -> Result<(), slint::PlatformError> {
                 ui.set_protection_status_msg("✅ Service berhasil di-uninstall.".into());
             }
             Err(e) => {
-                ui.set_protection_status_msg(format!("❌ Gagal uninstall: {}", e).into());
+                ui.set_protection_status_msg(format!("❌ {}", e).into());
             }
         }
     });
@@ -649,12 +652,8 @@ fn install_service() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Gagal menjalankan sc.exe create: {}", e))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(anyhow::anyhow!(
-            "sc.exe create gagal: {} {}",
-            stdout.trim(),
-            stderr.trim()
+            "Gagal install service. Jalankan aplikasi sebagai Administrator."
         ));
     }
 
@@ -684,12 +683,8 @@ fn uninstall_service() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Gagal menjalankan sc.exe delete: {}", e))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(anyhow::anyhow!(
-            "sc.exe delete gagal: {} {}",
-            stdout.trim(),
-            stderr.trim()
+            "Gagal uninstall service. Jalankan aplikasi sebagai Administrator."
         ));
     }
 
@@ -705,12 +700,8 @@ fn start_service() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Gagal menjalankan sc.exe start: {}", e))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(anyhow::anyhow!(
-            "sc.exe start gagal: {} {}",
-            stdout.trim(),
-            stderr.trim()
+            "Gagal memulai service. Jalankan aplikasi sebagai Administrator."
         ));
     }
 
@@ -725,12 +716,8 @@ fn stop_service() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Gagal menjalankan sc.exe stop: {}", e))?;
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let stdout = String::from_utf8_lossy(&output.stdout);
         return Err(anyhow::anyhow!(
-            "sc.exe stop gagal: {} {}",
-            stdout.trim(),
-            stderr.trim()
+            "Gagal menghentikan service. Jalankan aplikasi sebagai Administrator."
         ));
     }
 

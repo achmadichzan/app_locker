@@ -18,6 +18,8 @@ export component ManagementPanel inherits Window {
     in-out property <string> password-status-msg: "";
     in-out property <bool> startup-enabled: false;
     in-out property <string> startup-status-msg: "";
+    in-out property <bool> protection-active: false;
+    in-out property <string> protection-status-msg: "";
 
     callback toggle-app(int);
     callback add-app(string);
@@ -28,6 +30,8 @@ export component ManagementPanel inherits Window {
     callback select-running-app(string);
     callback change-password(string, string, string);
     callback toggle-startup();
+    callback toggle-protection();
+    callback check-protection-status();
 
     title: "App Locker";
     width: 480px;
@@ -295,6 +299,61 @@ export component ManagementPanel inherits Window {
                 text: root.status-msg;
                 font-size: 12px;
                 color: #16a34a;
+                horizontal-alignment: center;
+            }
+
+            Rectangle {
+                height: 52px;
+                border-radius: 10px;
+                background: #16213e;
+                border-color: root.protection-active ? #16a34a : #0f3460;
+                border-width: root.protection-active ? 2px : 1px;
+
+                HorizontalLayout {
+                    padding-left: 16px;
+                    padding-right: 16px;
+                    spacing: 12px;
+
+                    Text {
+                        text: root.protection-active ? "🛡️  Proteksi Aktif" : "🛡️  Proteksi Nonaktif";
+                        font-size: 14px;
+                        font-weight: 600;
+                        color: root.protection-active ? #16a34a : #ff6b6b;
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+
+                    Rectangle {
+                        width: 48px;
+                        height: 26px;
+                        border-radius: 13px;
+                        background: root.protection-active ? #16a34a : #3a3a55;
+                        y: (parent.height - self.height) / 2;
+
+                        animate background { duration: 200ms; easing: ease-in-out; }
+
+                        Rectangle {
+                            width: 20px;
+                            height: 20px;
+                            border-radius: 10px;
+                            background: white;
+                            y: 3px;
+                            x: root.protection-active ? parent.width - self.width - 3px : 3px;
+
+                            animate x { duration: 200ms; easing: ease-in-out; }
+                        }
+
+                        prot-ta := TouchArea {
+                            clicked => { root.toggle-protection(); }
+                        }
+                    }
+                }
+            }
+
+            if root.protection-status-msg != "": Text {
+                text: root.protection-status-msg;
+                font-size: 12px;
+                color: root.protection-status-msg == "✅ Proteksi diaktifkan!" || root.protection-status-msg == "✅ Proteksi dinonaktifkan." ? #16a34a : #ff6b6b;
                 horizontal-alignment: center;
             }
 

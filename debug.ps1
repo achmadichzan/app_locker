@@ -13,12 +13,9 @@ if (!(Test-Path -Path $OutputDir)) {
 
 # 3. Salin executable dari target\debug ke folder debug_bin
 Write-Host "Menyiapkan file di folder '$OutputDir'..." -ForegroundColor Yellow
-$Executables = @("daemon.exe", "ui.exe", "watchdog.exe")
-foreach ($Exe in $Executables) {
-    $SourcePath = "target\debug\$Exe"
-    if (Test-Path -Path $SourcePath) {
-        Copy-Item -Path $SourcePath -Destination "$OutputDir\$Exe" -Force
-    }
+$SourcePath = "target\debug\app_locker.exe"
+if (Test-Path -Path $SourcePath) {
+    Copy-Item -Path $SourcePath -Destination "$OutputDir\app_locker.exe" -Force
 }
 
 Write-Host "🚀 Menjalankan Daemon di terminal..." -ForegroundColor Green
@@ -27,4 +24,4 @@ Write-Host "-------------------------------------------------"
 
 # 4. Pindah ke folder debug_bin dan jalankan daemon
 Set-Location -Path $OutputDir
-.\daemon.exe
+.\app_locker.exe --daemon

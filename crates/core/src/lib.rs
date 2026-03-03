@@ -98,14 +98,11 @@ pub fn set_startup_enabled(enabled: bool) -> Result<()> {
     let hkcu = RegKey::predef(HKEY_CURRENT_USER);
 
     if enabled {
-        let exe_dir = std::env::current_exe()?
-            .parent()
-            .ok_or_else(|| anyhow::anyhow!("Tidak dapat menemukan parent directory"))?
-            .to_path_buf();
-        let daemon_path = exe_dir.join("daemon.exe");
+        let exe_path = std::env::current_exe()?;
+        let startup_command = format!("\"{}\" --watchdog", exe_path.to_string_lossy());
 
         let (key, _) = hkcu.create_subkey(REGISTRY_KEY)?;
-        key.set_value(REGISTRY_VALUE_NAME, &daemon_path.to_string_lossy().to_string())?;
+        key.set_value(REGISTRY_VALUE_NAME, &startup_command)?;
     } else {
         let key = hkcu.open_subkey_with_flags(REGISTRY_KEY, KEY_WRITE)?;
         key.delete_value(REGISTRY_VALUE_NAME).ok();

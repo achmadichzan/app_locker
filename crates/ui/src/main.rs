@@ -14,21 +14,22 @@ mod interceptor;
 mod ipc;
 mod panel;
 mod service;
+pub mod tray;
 
 slint::include_modules!();
 
 pub fn exe_dir() -> PathBuf {
     env::current_exe()
-        .unwrap()
-        .parent()
-        .expect("Tidak dapat menemukan parent directory")
-        .to_path_buf()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(app_core::get_default_config_dir)
 }
 
 pub async fn ipc_server_loop(
     config: Arc<Mutex<AppConfig>>,
     interceptor_path: String,
     recently_unlocked: Arc<Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
+    failed_attempts: Arc<Mutex<std::collections::HashMap<String, (u32, tokio::time::Instant)>>>,
 ) {
     info!("IPC Server mendengarkan di {}", PIPE_NAME);
 
@@ -51,15 +52,25 @@ pub async fn ipc_server_loop(
         let config_clone = config.clone();
         let interceptor_clone = interceptor_path.clone();
         let unlocked_clone = recently_unlocked.clone();
+        let failed_clone = failed_attempts.clone();
         tokio::spawn(async move {
             let mut server = server;
-            ipc::handle_ipc_client(&mut server, config_clone, interceptor_clone, unlocked_clone).await;
+            ipc::handle_ipc_client(&mut server, config_clone, interceptor_clone, unlocked_clone, failed_clone).await;
         });
     }
 }
 
 fn init_logging() {
     let log_path = exe_dir().join("app_locker.log");
+
+    // ponytail: size-based log rotation at 5MB threshold
+    if let Ok(meta) = std::fs::metadata(&log_path) {
+        if meta.len() > 5 * 1024 * 1024 {
+            let old_path = exe_dir().join("app_locker.log.old");
+            let _ = std::fs::rename(&log_path, &old_path);
+        }
+    }
+
     if let Ok(file) = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -77,9 +88,14 @@ fn init_logging() {
 
 fn main() -> anyhow::Result<()> {
     init_logging();
-    info!("App Locker dimulai dengan argumen: {:?}", env::args().collect::<Vec<_>>());
 
     let args: Vec<String> = env::args().collect();
+    if args.iter().any(|a| a.starts_with("--type=")) {
+        tracing::debug!("App Locker dimulai dengan argumen: {:?}", args);
+    } else {
+        info!("App Locker dimulai dengan argumen: {:?}", args);
+    }
+
     match cli::parse_cli_args(&args) {
         cli::AppMode::Service => service::run_service(),
         cli::AppMode::Interceptor {

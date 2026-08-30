@@ -14,36 +14,29 @@ use windows::core::s;
 
 type NtSuspendResumeProcess = unsafe extern "system" fn(HANDLE) -> i32;
 
-fn load_ntdll_fn(name: &str) -> Result<NtSuspendResumeProcess> {
-    unsafe {
-        let ntdll =
-            LoadLibraryA(s!("ntdll.dll")).map_err(|e| anyhow!("Gagal load ntdll.dll: {}", e))?;
-
-        let c_name = std::ffi::CString::new(name).map_err(|_| anyhow!("Nama fungsi invalid"))?;
-
-        let proc = GetProcAddress(ntdll, windows::core::PCSTR(c_name.as_ptr() as *const u8))
-            .ok_or_else(|| anyhow!("Fungsi {} tidak ditemukan di ntdll.dll", name))?;
-
-        Ok(std::mem::transmute::<
-            unsafe extern "system" fn() -> isize,
-            NtSuspendResumeProcess,
-        >(proc))
-    }
-}
-
 pub struct WindowsProcessManager {
     nt_suspend: NtSuspendResumeProcess,
     nt_resume: NtSuspendResumeProcess,
 }
 
+// SAFETY: Function pointers loaded from ntdll.dll are process-global, immutable, and stateless.
 unsafe impl Send for WindowsProcessManager {}
 unsafe impl Sync for WindowsProcessManager {}
 
 impl WindowsProcessManager {
     pub fn new() -> Self {
-        Self {
-            nt_suspend: load_ntdll_fn("NtSuspendProcess").expect("Gagal load NtSuspendProcess"),
-            nt_resume: load_ntdll_fn("NtResumeProcess").expect("Gagal load NtResumeProcess"),
+        unsafe {
+            let ntdll = LoadLibraryA(s!("ntdll.dll")).expect("Gagal load ntdll.dll");
+            let get_fn = |name: &str| -> NtSuspendResumeProcess {
+                let c_name = std::ffi::CString::new(name).unwrap();
+                let proc = GetProcAddress(ntdll, windows::core::PCSTR(c_name.as_ptr() as *const u8))
+                    .unwrap_or_else(|| panic!("Fungsi {} tidak ditemukan di ntdll.dll", name));
+                std::mem::transmute::<unsafe extern "system" fn() -> isize, NtSuspendResumeProcess>(proc)
+            };
+            Self {
+                nt_suspend: get_fn("NtSuspendProcess"),
+                nt_resume: get_fn("NtResumeProcess"),
+            }
         }
     }
 
@@ -171,6 +164,8 @@ pub fn launch_bypassing_ifeo(app_path: &str, args: &[String]) -> Result<u32> {
             windows::core::PWSTR(cmd_vec.as_mut_ptr()),
             None,
             None,
+            // Chromium multiprocess architecture passes IPC/Mojo handles via command-line arguments
+            // (e.g. --mojo-platform-channel-handle, --metrics-shmem-handle) which require handle inheritance.
             true,
             DEBUG_ONLY_THIS_PROCESS,
             None,

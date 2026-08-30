@@ -9,70 +9,104 @@ pub fn run_management_panel() -> Result<(), slint::PlatformError> {
     center_window(ui.window(), 480.0, 520.0);
 
     let config = AppConfig::load(&crate::exe_dir());
-    refresh_app_list(&ui, &config);
+    let items: Vec<crate::AppItem> = config
+        .locked_apps
+        .iter()
+        .map(|name| crate::AppItem {
+            name: name.clone().into(),
+            locked: true,
+        })
+        .collect();
+
+    let apps_model = std::rc::Rc::new(slint::VecModel::from(items));
+    ui.set_apps(apps_model.clone().into());
 
     let is_active = is_service_running();
     ui.set_protection_active(is_active);
 
-    let ui_weak = ui.as_weak();
-    ui.on_toggle_app(move |index| {
-        let ui = ui_weak.unwrap();
-        let mut apps = model_to_vec(&ui.get_apps());
-        if let Some(item) = apps.get_mut(index as usize) {
-            item.locked = !item.locked;
-        }
-        let model = std::rc::Rc::new(slint::VecModel::from(apps));
-        ui.set_apps(model.into());
-    });
+    // Initialize System Tray
+    let _ = crate::tray::windows_tray::init_tray(ui.as_weak());
 
     let ui_weak = ui.as_weak();
+    ui.window().on_close_requested(move || {
+        if let Some(ui) = ui_weak.upgrade() {
+            ui.window().set_minimized(true);
+        }
+        #[cfg(target_os = "windows")]
+        {
+            use windows::core::{w, PCWSTR};
+            use windows::Win32::UI::WindowsAndMessaging::{FindWindowW, ShowWindow, SW_HIDE};
+            let title = w!("App Locker");
+            let app_hwnd = unsafe { FindWindowW(PCWSTR::null(), title) };
+            if app_hwnd.0 != 0 {
+                let _ = unsafe { ShowWindow(app_hwnd, SW_HIDE) };
+            }
+        }
+        slint::CloseRequestResponse::KeepWindowShown
+    });
+
+    let apps_toggle = apps_model.clone();
+    ui.on_toggle_app(move |index| {
+        let idx = index as usize;
+        if let Some(mut item) = apps_toggle.row_data(idx) {
+            item.locked = !item.locked;
+            apps_toggle.set_row_data(idx, item);
+        }
+    });
+
+    let apps_add = apps_model.clone();
+    let ui_weak = ui.as_weak();
     ui.on_add_app(move |name| {
-        let ui = ui_weak.unwrap();
+        let Some(ui) = ui_weak.upgrade() else { return; };
         let name_str = name.to_string().trim().to_lowercase();
         if name_str.is_empty() {
             return;
         }
 
-        let mut apps = model_to_vec(&ui.get_apps());
-
-        if apps
-            .iter()
-            .any(|a| a.name.to_string().to_lowercase() == name_str)
-        {
-            ui.set_status_msg("Aplikasi sudah ada di daftar.".into());
-            return;
+        for i in 0..apps_add.row_count() {
+            if let Some(item) = apps_add.row_data(i) {
+                if item.name.to_string().to_lowercase() == name_str {
+                    ui.set_status_msg("Aplikasi sudah ada di daftar.".into());
+                    return;
+                }
+            }
         }
 
-        apps.push(crate::AppItem {
+        apps_add.push(crate::AppItem {
             name: name_str.into(),
             locked: true,
         });
-        let model = std::rc::Rc::new(slint::VecModel::from(apps));
-        ui.set_apps(model.into());
         ui.set_status_msg("".into());
     });
 
-    let ui_weak = ui.as_weak();
+    let apps_remove = apps_model.clone();
     ui.on_remove_app(move |index| {
-        let ui = ui_weak.unwrap();
-        let mut apps = model_to_vec(&ui.get_apps());
-        if (index as usize) < apps.len() {
-            apps.remove(index as usize);
+        let idx = index as usize;
+        if idx < apps_remove.row_count() {
+            apps_remove.remove(idx);
         }
-        let model = std::rc::Rc::new(slint::VecModel::from(apps));
-        ui.set_apps(model.into());
     });
 
     let ui_weak = ui.as_weak();
     ui.on_browse_file(move || {
-        let picked = rfd::FileDialog::new()
-            .add_filter("Executable", &["exe"])
-            .pick_file();
-        if let Some(file_name) = picked.as_ref().and_then(|p| p.file_name()).and_then(|n| n.to_str())
-            && let Some(ui) = ui_weak.upgrade()
-        {
-            ui.set_new_app_name(file_name.into());
-        }
+        let ui_handle = ui_weak.clone();
+        std::thread::spawn(move || {
+            let picked = rfd::FileDialog::new()
+                .add_filter("Executable", &["exe"])
+                .pick_file();
+            if let Some(file_name) = picked
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .and_then(|n| n.to_str())
+            {
+                let name = file_name.to_string();
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = ui_handle.upgrade() {
+                        ui.set_new_app_name(name.into());
+                    }
+                });
+            }
+        });
     });
 
     let ui_weak = ui.as_weak();
@@ -202,9 +236,15 @@ pub fn run_management_panel() -> Result<(), slint::PlatformError> {
 
     let ui_weak = ui.as_weak();
     ui.on_check_protection_status(move || {
-        if let Some(ui) = ui_weak.upgrade() {
-            ui.set_protection_active(is_service_running());
-        }
+        let ui_handle = ui_weak.clone();
+        std::thread::spawn(move || {
+            let running = is_service_running();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = ui_handle.upgrade() {
+                    ui.set_protection_active(running);
+                }
+            });
+        });
     });
 
     let ui_weak = ui.as_weak();
@@ -261,7 +301,8 @@ pub fn run_management_panel() -> Result<(), slint::PlatformError> {
 
     ui.set_service_installed(is_service_installed());
 
-    ui.run()
+    ui.show()?;
+    slint::run_event_loop()
 }
 
 pub fn install_service() -> anyhow::Result<()> {
@@ -317,18 +358,4 @@ fn model_to_vec(model: &slint::ModelRc<crate::AppItem>) -> Vec<crate::AppItem> {
     (0..model.row_count())
         .filter_map(|i| model.row_data(i))
         .collect()
-}
-
-fn refresh_app_list(ui: &crate::ManagementPanel, config: &AppConfig) {
-    let items: Vec<crate::AppItem> = config
-        .locked_apps
-        .iter()
-        .map(|name| crate::AppItem {
-            name: name.clone().into(),
-            locked: true,
-        })
-        .collect();
-
-    let model = std::rc::Rc::new(slint::VecModel::from(items));
-    ui.set_apps(model.into());
 }

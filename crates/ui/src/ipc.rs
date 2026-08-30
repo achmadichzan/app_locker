@@ -17,8 +17,8 @@ pub fn create_open_pipe() -> std::io::Result<NamedPipeServer> {
 
     unsafe {
         let mut p_sd = PSECURITY_DESCRIPTOR::default();
-        // SDDL: Everyone (WD) Full, Authenticated Users (AU) Full, Admins (BA) Full, SYSTEM (SY) Full
-        let sddl = w!("D:(A;;GA;;;WD)(A;;GA;;;AU)(A;;GA;;;BA)(A;;GA;;;SY)");
+        // SDDL: Authenticated Users (AU) Full, Admins (BA) Full, SYSTEM (SY) Full
+        let sddl = w!("D:(A;;GA;;;AU)(A;;GA;;;BA)(A;;GA;;;SY)");
 
         if ConvertStringSecurityDescriptorToSecurityDescriptorW(
             sddl,
@@ -31,24 +31,30 @@ pub fn create_open_pipe() -> std::io::Result<NamedPipeServer> {
             return Err(std::io::Error::last_os_error());
         }
 
+        struct SdGuard(PSECURITY_DESCRIPTOR);
+        impl Drop for SdGuard {
+            fn drop(&mut self) {
+                if !self.0.0.is_null() {
+                    let _ = unsafe { LocalFree(HLOCAL(self.0.0)) };
+                }
+            }
+        }
+        let _guard = SdGuard(p_sd);
+
         let mut sa = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: p_sd.0,
             bInheritHandle: windows::Win32::Foundation::BOOL(0),
         };
 
-        let server_result = ServerOptions::new()
+        ServerOptions::new()
             .access_inbound(true)
             .access_outbound(true)
             .pipe_mode(tokio::net::windows::named_pipe::PipeMode::Message)
             .create_with_security_attributes_raw(
                 PIPE_NAME,
                 &mut sa as *mut _ as *mut c_void,
-            );
-
-        let _ = LocalFree(HLOCAL(p_sd.0));
-
-        server_result
+            )
     }
 }
 
@@ -57,6 +63,7 @@ pub async fn handle_ipc_client(
     config: Arc<Mutex<AppConfig>>,
     interceptor_path: String,
     recently_unlocked: Arc<Mutex<std::collections::HashMap<String, tokio::time::Instant>>>,
+    failed_attempts: Arc<Mutex<std::collections::HashMap<String, (u32, tokio::time::Instant)>>>,
 ) {
     let mut buffer = vec![0u8; 4096];
     let bytes_read = match server.read(&mut buffer).await {
@@ -80,43 +87,88 @@ pub async fn handle_ipc_client(
             password,
         } => {
             let norm_app_name = app_name.trim().to_lowercase();
-            let cfg = config.lock().await;
 
-            let auto_approved = {
-                let unlocked = recently_unlocked.lock().await;
-                if let Some(unlock_time) = unlocked.get(&norm_app_name) {
-                    unlock_time.elapsed() < Duration::from_secs(30)
+            // ponytail: rate limit -- max 5 failures per 60s per app, bounded cleanup
+            let rate_limited = {
+                let mut attempts = failed_attempts.lock().await;
+                attempts.retain(|_, (_, time)| time.elapsed() < Duration::from_secs(60));
+                if let Some((count, first_fail)) = attempts.get(&norm_app_name) {
+                    *count >= 5 && first_fail.elapsed() < Duration::from_secs(60)
                 } else {
                     false
                 }
             };
 
-            let is_valid = auto_approved || cfg.verify_password(&password);
-
-            if is_valid {
-                if auto_approved {
-                    info!("Auto-approve untuk {} (child process dalam 30 detik)", norm_app_name);
-                } else {
-                    info!("Password benar untuk {}. Menghapus IFEO sementara...", norm_app_name);
-                }
-
-                {
-                    let mut unlocked = recently_unlocked.lock().await;
-                    unlocked.insert(norm_app_name.clone(), tokio::time::Instant::now());
-                }
-
-                let guard = infra::IfeoUnlockGuard::new(norm_app_name.clone(), interceptor_path.clone());
-                info!("IfeoUnlockGuard selesai dibuat untuk {}", norm_app_name);
-                tokio::spawn(async move {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    drop(guard);
-                    info!("IFEO dipasang kembali untuk {}", norm_app_name);
-                });
-
-                IpcResponse::Success
+            if rate_limited {
+                warn!("Rate limit untuk {}", norm_app_name);
+                IpcResponse::Error("Terlalu banyak percobaan. Coba lagi dalam 60 detik.".into())
             } else {
-                warn!("Password salah untuk {}", norm_app_name);
-                IpcResponse::WrongPassword
+                let auto_approved = {
+                    let mut unlocked = recently_unlocked.lock().await;
+                    unlocked.retain(|_, time| time.elapsed() < Duration::from_secs(30));
+                    if let Some(unlock_time) = unlocked.get(&norm_app_name) {
+                        unlock_time.elapsed() < Duration::from_secs(30)
+                    } else {
+                        false
+                    }
+                };
+
+                let is_valid = if auto_approved {
+                    true
+                } else {
+                    let cfg_pwd = config.lock().await.password.clone();
+                    let pass = password.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let dummy = app_core::AppConfig {
+                            password: cfg_pwd,
+                            locked_apps: Vec::new(),
+                        };
+                        dummy.verify_password(&pass)
+                    })
+                    .await
+                    .unwrap_or(false)
+                };
+
+                if is_valid {
+                    if auto_approved {
+                        info!("Auto-approve untuk {} (child process dalam 30 detik)", norm_app_name);
+                    } else {
+                        info!("Password benar untuk {}. Menonaktifkan IFEO sementara...", norm_app_name);
+                    }
+
+                    {
+                        let mut unlocked = recently_unlocked.lock().await;
+                        unlocked.insert(norm_app_name.clone(), tokio::time::Instant::now());
+                    }
+
+                    {
+                        let mut attempts = failed_attempts.lock().await;
+                        attempts.remove(&norm_app_name);
+                    }
+
+                    let guard = infra::IfeoUnlockGuard::new(norm_app_name.clone(), interceptor_path.clone());
+                    tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        drop(guard);
+                        info!("IFEO dipasang kembali untuk {}", norm_app_name);
+                    });
+
+                    IpcResponse::Success
+                } else {
+                    warn!("Password salah untuk {}", norm_app_name);
+
+                    {
+                        let mut attempts = failed_attempts.lock().await;
+                        let entry = attempts.entry(norm_app_name).or_insert((0, tokio::time::Instant::now()));
+                        if entry.1.elapsed() >= Duration::from_secs(60) {
+                            *entry = (1, tokio::time::Instant::now());
+                        } else {
+                            entry.0 += 1;
+                        }
+                    }
+
+                    IpcResponse::WrongPassword
+                }
             }
         }
         IpcRequest::CancelLaunch { app_name } => {
@@ -127,22 +179,51 @@ pub async fn handle_ipc_client(
             old_password,
             new_password,
         } => {
-            let mut cfg = config.lock().await;
-            if !cfg.verify_password(&old_password) {
+            let cfg_pwd = config.lock().await.password.clone();
+            let old_p = old_password.clone();
+            let old_valid = tokio::task::spawn_blocking(move || {
+                let dummy = app_core::AppConfig {
+                    password: cfg_pwd,
+                    locked_apps: Vec::new(),
+                };
+                dummy.verify_password(&old_p)
+            })
+            .await
+            .unwrap_or(false);
+
+            if !old_valid {
                 warn!("Gagal ubah password: password lama salah");
                 IpcResponse::WrongPassword
-            } else if let Err(e) = cfg.set_password(&new_password) {
-                error!("Gagal hash password baru: {}", e);
-                IpcResponse::Error(e)
             } else {
-                match cfg.save(&crate::exe_dir()) {
-                    Ok(_) => {
-                        info!("Password berhasil diubah");
-                        IpcResponse::PasswordChanged
+                let new_p = new_password.clone();
+                let hash_res = tokio::task::spawn_blocking(move || {
+                    let mut dummy = app_core::AppConfig::default();
+                    dummy.set_password(&new_p).map(|_| dummy.password)
+                })
+                .await;
+
+                match hash_res {
+                    Ok(Ok(new_hashed)) => {
+                        let mut cfg = config.lock().await;
+                        cfg.password = new_hashed;
+                        match cfg.save(&crate::exe_dir()) {
+                            Ok(_) => {
+                                info!("Password berhasil diubah");
+                                IpcResponse::PasswordChanged
+                            }
+                            Err(e) => {
+                                error!("Gagal menyimpan password baru: {}", e);
+                                IpcResponse::Error(format!("Gagal menyimpan: {}", e))
+                            }
+                        }
+                    }
+                    Ok(Err(e)) => {
+                        error!("Gagal hash password baru: {}", e);
+                        IpcResponse::Error(e)
                     }
                     Err(e) => {
-                        error!("Gagal menyimpan password baru: {}", e);
-                        IpcResponse::Error(format!("Gagal menyimpan: {}", e))
+                        error!("Task join error saat hashing: {}", e);
+                        IpcResponse::Error(format!("Internal error: {}", e))
                     }
                 }
             }
@@ -286,6 +367,7 @@ mod tests {
         config.set_password("correct_pass").unwrap();
         let config = Arc::new(Mutex::new(config));
         let recently_unlocked = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let failed_attempts = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let interceptor_path = "C:\\app_locker.exe".to_string();
 
         // 1. Test Wrong Password
@@ -299,9 +381,10 @@ mod tests {
         let cfg1 = config.clone();
         let int1 = interceptor_path.clone();
         let unl1 = recently_unlocked.clone();
+        let fail1 = failed_attempts.clone();
         let srv1 = tokio::spawn(async move {
             server.connect().await.unwrap();
-            handle_ipc_client(&mut server, cfg1, int1, unl1).await;
+            handle_ipc_client(&mut server, cfg1, int1, unl1, fail1).await;
         });
 
         let res = send_test_ipc_request(
@@ -328,9 +411,10 @@ mod tests {
         let cfg2 = config.clone();
         let int2 = interceptor_path.clone();
         let unl2 = recently_unlocked.clone();
+        let fail2 = failed_attempts.clone();
         let srv2 = tokio::spawn(async move {
             server.connect().await.unwrap();
-            handle_ipc_client(&mut server, cfg2, int2, unl2).await;
+            handle_ipc_client(&mut server, cfg2, int2, unl2, fail2).await;
         });
 
         let res = send_test_ipc_request(
@@ -357,9 +441,10 @@ mod tests {
         let cfg3 = config.clone();
         let int3 = interceptor_path.clone();
         let unl3 = recently_unlocked.clone();
+        let fail3 = failed_attempts.clone();
         let srv3 = tokio::spawn(async move {
             server.connect().await.unwrap();
-            handle_ipc_client(&mut server, cfg3, int3, unl3).await;
+            handle_ipc_client(&mut server, cfg3, int3, unl3, fail3).await;
         });
 
         let res = send_test_ipc_request(
@@ -386,6 +471,7 @@ mod tests {
         config.set_password("old_pass_123").unwrap();
         let config = Arc::new(Mutex::new(config));
         let recently_unlocked = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let failed_attempts = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let interceptor_path = "C:\\app_locker.exe".to_string();
 
         // 1. Wrong old password
@@ -399,9 +485,10 @@ mod tests {
         let cfg1 = config.clone();
         let int1 = interceptor_path.clone();
         let unl1 = recently_unlocked.clone();
+        let fail1 = failed_attempts.clone();
         let srv1 = tokio::spawn(async move {
             server.connect().await.unwrap();
-            handle_ipc_client(&mut server, cfg1, int1, unl1).await;
+            handle_ipc_client(&mut server, cfg1, int1, unl1, fail1).await;
         });
 
         let res = send_test_ipc_request(
@@ -427,9 +514,10 @@ mod tests {
         let cfg2 = config.clone();
         let int2 = interceptor_path.clone();
         let unl2 = recently_unlocked.clone();
+        let fail2 = failed_attempts.clone();
         let srv2 = tokio::spawn(async move {
             server.connect().await.unwrap();
-            handle_ipc_client(&mut server, cfg2, int2, unl2).await;
+            handle_ipc_client(&mut server, cfg2, int2, unl2, fail2).await;
         });
 
         let res = send_test_ipc_request(
@@ -457,9 +545,10 @@ mod tests {
         let cfg3 = config.clone();
         let int3 = interceptor_path.clone();
         let unl3 = recently_unlocked.clone();
+        let fail3 = failed_attempts.clone();
         let srv3 = tokio::spawn(async move {
             server.connect().await.unwrap();
-            handle_ipc_client(&mut server, cfg3, int3, unl3).await;
+            handle_ipc_client(&mut server, cfg3, int3, unl3, fail3).await;
         });
 
         let res = send_test_ipc_request(
@@ -484,6 +573,7 @@ mod tests {
         config.set_password("burst_secret").unwrap();
         let config = Arc::new(Mutex::new(config));
         let recently_unlocked = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let failed_attempts = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let interceptor_path = "C:\\app_locker.exe".to_string();
 
         let stop_flag = Arc::new(tokio::sync::Notify::new());
@@ -492,6 +582,7 @@ mod tests {
         let config_srv = config.clone();
         let interceptor_srv = interceptor_path.clone();
         let unlocked_srv = recently_unlocked.clone();
+        let failed_srv = failed_attempts.clone();
 
         let server_task = tokio::spawn(async move {
             let mut is_first = true;
@@ -512,9 +603,10 @@ mod tests {
                     let cfg = config_srv.clone();
                     let int = interceptor_srv.clone();
                     let unl = unlocked_srv.clone();
+                    let fail = failed_srv.clone();
                     tokio::spawn(async move {
                         let mut server = server;
-                        handle_ipc_client(&mut server, cfg, int, unl).await;
+                        handle_ipc_client(&mut server, cfg, int, unl, fail).await;
                     });
                 }
             }
@@ -565,6 +657,7 @@ mod tests {
         config.set_password("mypass").unwrap();
         let config = Arc::new(Mutex::new(config));
         let recently_unlocked = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let failed_attempts = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let interceptor_path = "C:\\app_locker.exe".to_string();
 
         let mut server = ServerOptions::new()
@@ -577,9 +670,10 @@ mod tests {
         let cfg = config.clone();
         let int = interceptor_path.clone();
         let unl = recently_unlocked.clone();
+        let fail = failed_attempts.clone();
         let srv = tokio::spawn(async move {
             server.connect().await.unwrap();
-            handle_ipc_client(&mut server, cfg, int, unl).await;
+            handle_ipc_client(&mut server, cfg, int, unl, fail).await;
         });
 
         // Launch with uppercase name
@@ -611,6 +705,7 @@ mod tests {
         config.set_password("secure_pass").unwrap();
         let config = Arc::new(Mutex::new(config));
         let recently_unlocked = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let failed_attempts = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let interceptor_path = "C:\\app_locker.exe".to_string();
 
         // Manually insert an expired unlock timestamp (40 seconds ago)
@@ -630,9 +725,10 @@ mod tests {
         let cfg = config.clone();
         let int = interceptor_path.clone();
         let unl = recently_unlocked.clone();
+        let fail = failed_attempts.clone();
         let srv = tokio::spawn(async move {
             server.connect().await.unwrap();
-            handle_ipc_client(&mut server, cfg, int, unl).await;
+            handle_ipc_client(&mut server, cfg, int, unl, fail).await;
         });
 
         // Request with wrong password should NOT be auto-approved
@@ -662,6 +758,7 @@ mod tests {
         let pipe_name = get_unique_pipe_name();
         let config = Arc::new(Mutex::new(AppConfig::default()));
         let recently_unlocked = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let failed_attempts = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let interceptor_path = "C:\\app_locker.exe".to_string();
 
         let mut server = ServerOptions::new()
@@ -674,9 +771,10 @@ mod tests {
         let cfg = config.clone();
         let int = interceptor_path.clone();
         let unl = recently_unlocked.clone();
+        let fail = failed_attempts.clone();
         let srv = tokio::spawn(async move {
             server.connect().await.unwrap();
-            handle_ipc_client(&mut server, cfg, int, unl).await;
+            handle_ipc_client(&mut server, cfg, int, unl, fail).await;
         });
 
         let mut client = ClientOptions::new().open(&pipe_name).unwrap();
@@ -697,6 +795,7 @@ mod tests {
         config.set_password("pass_zero").unwrap();
         let config = Arc::new(Mutex::new(config));
         let recently_unlocked = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let failed_attempts = Arc::new(Mutex::new(std::collections::HashMap::new()));
         let interceptor_path = "C:\\app_locker.exe".to_string();
 
         // Rotation 1: pass_zero -> pass_one
@@ -709,9 +808,10 @@ mod tests {
         let cfg = config.clone();
         let int = interceptor_path.clone();
         let unl = recently_unlocked.clone();
+        let fail = failed_attempts.clone();
         let srv1 = tokio::spawn(async move {
             server1.connect().await.unwrap();
-            handle_ipc_client(&mut server1, cfg, int, unl).await;
+            handle_ipc_client(&mut server1, cfg, int, unl, fail).await;
         });
 
         let res1 = send_test_ipc_request(
@@ -736,9 +836,10 @@ mod tests {
         let cfg = config.clone();
         let int = interceptor_path.clone();
         let unl = recently_unlocked.clone();
+        let fail = failed_attempts.clone();
         let srv2 = tokio::spawn(async move {
             server2.connect().await.unwrap();
-            handle_ipc_client(&mut server2, cfg, int, unl).await;
+            handle_ipc_client(&mut server2, cfg, int, unl, fail).await;
         });
 
         let res2 = send_test_ipc_request(
@@ -863,5 +964,111 @@ mod tests {
 
         srv.await.unwrap();
         client_task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_ipc_rate_limiting_after_five_failed_attempts() {
+        let pipe_name = get_unique_pipe_name();
+        let mut config = AppConfig::default();
+        config.set_password("correct_pass").unwrap();
+        let config = Arc::new(Mutex::new(config));
+        let recently_unlocked = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let failed_attempts = Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let interceptor_path = "C:\\app_locker.exe".to_string();
+
+        let pipe_name_srv = pipe_name.clone();
+        let config_srv = config.clone();
+        let interceptor_srv = interceptor_path.clone();
+        let unlocked_srv = recently_unlocked.clone();
+        let failed_srv = failed_attempts.clone();
+
+        let server_task = tokio::spawn(async move {
+            let mut is_first = true;
+            loop {
+                let server = ServerOptions::new()
+                    .access_inbound(true)
+                    .access_outbound(true)
+                    .first_pipe_instance(is_first)
+                    .create(&pipe_name_srv);
+
+                let mut server = match server {
+                    Ok(s) => s,
+                    Err(_) => break,
+                };
+                is_first = false;
+
+                if server.connect().await.is_ok() {
+                    let cfg = config_srv.clone();
+                    let int = interceptor_srv.clone();
+                    let unl = unlocked_srv.clone();
+                    let fail = failed_srv.clone();
+                    tokio::spawn(async move {
+                        handle_ipc_client(&mut server, cfg, int, unl, fail).await;
+                    });
+                }
+            }
+        });
+
+        // 5 consecutive wrong passwords
+        for _ in 0..5 {
+            let res = send_test_ipc_request(
+                &pipe_name,
+                IpcRequest::LaunchApp {
+                    app_name: "target.exe".into(),
+                    app_path: "C:\\target.exe".into(),
+                    password: "wrong".into(),
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(res, IpcResponse::WrongPassword);
+        }
+
+        // 6th attempt should hit rate limit
+        let res6 = send_test_ipc_request(
+            &pipe_name,
+            IpcRequest::LaunchApp {
+                app_name: "target.exe".into(),
+                app_path: "C:\\target.exe".into(),
+                password: "wrong".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            res6,
+            IpcResponse::Error("Terlalu banyak percobaan. Coba lagi dalam 60 detik.".into())
+        );
+
+        // Correct password during rate limit is also rejected
+        let res_during_block = send_test_ipc_request(
+            &pipe_name,
+            IpcRequest::LaunchApp {
+                app_name: "target.exe".into(),
+                app_path: "C:\\target.exe".into(),
+                password: "correct_pass".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            res_during_block,
+            IpcResponse::Error("Terlalu banyak percobaan. Coba lagi dalam 60 detik.".into())
+        );
+
+        // Another app name should not be rate limited
+        let res_other = send_test_ipc_request(
+            &pipe_name,
+            IpcRequest::LaunchApp {
+                app_name: "other.exe".into(),
+                app_path: "C:\\other.exe".into(),
+                password: "correct_pass".into(),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(res_other, IpcResponse::Success);
+
+        server_task.abort();
     }
 }

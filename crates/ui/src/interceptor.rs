@@ -7,15 +7,18 @@ pub fn run_interceptor(
     app_path: &str,
     forward_args: Vec<String>,
 ) -> anyhow::Result<()> {
-    // 1. Auto-approve internal child processes (e.g. Chrome --type=utility, renderer, crashpad)
     let is_child_process = forward_args.iter().any(|arg| arg.starts_with("--type="));
     if is_child_process {
-        tracing::info!(
+        tracing::debug!(
             "Auto-approving child process launch for {} ({:?})",
             app_name,
             forward_args
         );
-        let _ = infra::launch_bypassing_ifeo(app_path, &forward_args);
+        let mut cmd = std::process::Command::new(app_path);
+        if !forward_args.is_empty() {
+            cmd.args(&forward_args);
+        }
+        let _ = cmd.spawn();
         return Ok(());
     }
 
@@ -76,49 +79,65 @@ pub fn run_interceptor(
                 info!("Hasil respon IPC kedua: {:?}", response);
             }
 
-            let _ = slint::invoke_from_event_loop(move || {
-                let Some(ui) = ui_handle.upgrade() else {
-                    warn!("Gagal upgrade ui_handle di Slint event loop");
-                    return;
-                };
-
-                match response {
-                    Ok(IpcResponse::Success) => {
-                        info!("IPC Success diterima, meluncurkan {}...", app_path);
-                        let mut cmd = std::process::Command::new(&app_path);
-                        if !forward_args.is_empty() {
-                            cmd.args(&forward_args);
-                        }
-                        match cmd.spawn() {
-                            Ok(child) => {
-                                info!("Aplikasi berhasil diluncurkan dengan PID: {}", child.id());
-                                let _ = ui.hide();
+            match response {
+                Ok(IpcResponse::Success) => {
+                    info!("IPC Success diterima, meluncurkan {}...", app_path);
+                    let mut cmd = std::process::Command::new(&app_path);
+                    if !forward_args.is_empty() {
+                        cmd.args(&forward_args);
+                    }
+                    match cmd.spawn() {
+                        Ok(child) => {
+                            info!("Aplikasi berhasil diluncurkan dengan PID: {}", child.id());
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = ui_handle.upgrade() {
+                                    let _ = ui.hide();
+                                }
                                 let _ = slint::quit_event_loop();
-                            }
-                            Err(e) => {
-                                error!("Gagal cmd.spawn(): {}", e);
-                                ui.set_is_loading(false);
-                                ui.set_error_msg(format!("Gagal meluncurkan aplikasi: {}", e).into());
-                            }
+                            });
                         }
-                    }
-                    Ok(IpcResponse::WrongPassword) => {
-                        warn!("Password salah diterima dari service");
-                        ui.set_is_loading(false);
-                        ui.set_error_msg("Password salah! Coba lagi.".into());
-                    }
-                    Ok(other) => {
-                        warn!("Respon tak terduga diterima: {:?}", other);
-                        ui.set_is_loading(false);
-                        ui.set_error_msg(format!("Terjadi kesalahan: {:?}", other).into());
-                    }
-                    Err(e) => {
-                        error!("Gagal total komunikasi IPC dengan service: {}", e);
-                        ui.set_is_loading(false);
-                        ui.set_error_msg(format!("Service tidak merespons ({}). Buka Management Panel.", e).into());
+                        Err(e) => {
+                            error!("Gagal meluncurkan aplikasi: {}", e);
+                            let msg = format!("Gagal meluncurkan aplikasi: {}", e);
+                            let _ = slint::invoke_from_event_loop(move || {
+                                if let Some(ui) = ui_handle.upgrade() {
+                                    ui.set_is_loading(false);
+                                    ui.set_error_msg(msg.into());
+                                }
+                            });
+                        }
                     }
                 }
-            });
+                Ok(IpcResponse::WrongPassword) => {
+                    warn!("Password salah diterima dari service");
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_handle.upgrade() {
+                            ui.set_is_loading(false);
+                            ui.set_error_msg("Password salah! Coba lagi.".into());
+                        }
+                    });
+                }
+                Ok(other) => {
+                    warn!("Respon tak terduga diterima: {:?}", other);
+                    let msg = format!("Terjadi kesalahan: {:?}", other);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_handle.upgrade() {
+                            ui.set_is_loading(false);
+                            ui.set_error_msg(msg.into());
+                        }
+                    });
+                }
+                Err(e) => {
+                    error!("Gagal total komunikasi IPC dengan service: {}", e);
+                    let msg = format!("Service tidak merespons ({}). Buka Management Panel.", e);
+                    let _ = slint::invoke_from_event_loop(move || {
+                        if let Some(ui) = ui_handle.upgrade() {
+                            ui.set_is_loading(false);
+                            ui.set_error_msg(msg.into());
+                        }
+                    });
+                }
+            }
         });
     });
 

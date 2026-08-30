@@ -3,7 +3,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tracing::{Level, error, info};
+use tracing::{error, info};
 use windows_service::{
     define_windows_service,
     service::{
@@ -30,10 +30,6 @@ fn service_main(_arguments: Vec<OsString>) {
 }
 
 fn run_service_inner() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_max_level(Level::INFO)
-        .try_init()
-        .ok();
     info!("AppLocker Service menyala...");
 
     // Protect process DACL to disallow unauthorized termination from Task Manager
@@ -110,11 +106,15 @@ fn run_service_inner() -> anyhow::Result<()> {
         let recently_unlocked: Arc<Mutex<std::collections::HashMap<String, tokio::time::Instant>>> =
             Arc::new(Mutex::new(std::collections::HashMap::new()));
 
+        let failed_attempts: Arc<Mutex<std::collections::HashMap<String, (u32, tokio::time::Instant)>>> =
+            Arc::new(Mutex::new(std::collections::HashMap::new()));
+
         let config_ipc = config.clone();
         let interceptor_ipc = interceptor_path.clone();
         let unlocked_ipc = recently_unlocked.clone();
+        let failed_ipc = failed_attempts.clone();
         let ipc_handle = tokio::spawn(async move {
-            crate::ipc_server_loop(config_ipc, interceptor_ipc, unlocked_ipc).await;
+            crate::ipc_server_loop(config_ipc, interceptor_ipc, unlocked_ipc, failed_ipc).await;
         });
 
         let _ = shutdown_rx.await;

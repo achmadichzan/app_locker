@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use app_core::AppConfig;
 
 const IFEO_BASE_KEY: &str =
@@ -28,7 +28,7 @@ pub fn set_ifeo(app_name: &str, interceptor_path: &str) -> Result<()> {
         }
         Err(e) => {
             tracing::warn!("Gagal membuat subkey IFEO untuk {}: {}", app_name, e);
-            Ok(())
+            Err(anyhow!("Gagal membuat subkey IFEO untuk {}: {}", app_name, e))
         }
     }
 }

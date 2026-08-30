@@ -132,7 +132,7 @@ impl AppConfig {
 }
 
 /// Permintaan IPC yang dikirimkan oleh Interceptor atau Panel ke Service.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub enum IpcRequest {
     /// Permintaan membuka aplikasi dengan verifikasi kata sandi.
     LaunchApp {
@@ -151,6 +151,29 @@ pub enum IpcRequest {
     },
     /// Permintaan sinkronisasi ulang konfigurasi dari disk.
     ReloadConfig,
+}
+
+impl std::fmt::Debug for IpcRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LaunchApp { app_name, app_path, .. } => f
+                .debug_struct("LaunchApp")
+                .field("app_name", app_name)
+                .field("app_path", app_path)
+                .field("password", &"[REDACTED]")
+                .finish(),
+            Self::CancelLaunch { app_name } => f
+                .debug_struct("CancelLaunch")
+                .field("app_name", app_name)
+                .finish(),
+            Self::ChangePassword { .. } => f
+                .debug_struct("ChangePassword")
+                .field("old_password", &"[REDACTED]")
+                .field("new_password", &"[REDACTED]")
+                .finish(),
+            Self::ReloadConfig => write!(f, "ReloadConfig"),
+        }
+    }
 }
 
 /// Respon balasan IPC dari Service ke client.

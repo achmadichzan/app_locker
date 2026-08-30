@@ -245,3 +245,24 @@ fn test_multithreaded_password_verification() {
         h.join().unwrap();
     }
 }
+
+#[test]
+fn test_ipc_request_debug_redaction() {
+    let req1 = IpcRequest::LaunchApp {
+        app_name: "test.exe".into(),
+        app_path: "C:\\test.exe".into(),
+        password: "super_secret_pass".into(),
+    };
+    let debug_str1 = format!("{:?}", req1);
+    assert!(!debug_str1.contains("super_secret_pass"));
+    assert!(debug_str1.contains("[REDACTED]"));
+
+    let req2 = IpcRequest::ChangePassword {
+        old_password: "old_secret".into(),
+        new_password: "new_secret".into(),
+    };
+    let debug_str2 = format!("{:?}", req2);
+    assert!(!debug_str2.contains("old_secret"));
+    assert!(!debug_str2.contains("new_secret"));
+    assert!(debug_str2.contains("[REDACTED]"));
+}

@@ -12,7 +12,7 @@ edition = "2024"
 authors = ["Achmad Ichzan"]
 
 [workspace.dependencies]
-tokio = { version = "1.36", features = ["full"] }
+tokio = { version = "1.53", features = ["full"] }
 anyhow = "1.0"
 tracing = "0.1"
 windows-service = "0.8"

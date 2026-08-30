@@ -413,6 +413,7 @@ export component ManagementPanel inherits Window {
 export component AppPrompt inherits Window {
     in property <string> target_name: "Aplikasi";
     in-out property <string> error_msg: "";
+    in-out property <bool> is-loading: false;
 
     callback unlock-requested(string);
     callback cancel-requested();
@@ -470,7 +471,14 @@ export component AppPrompt inherits Window {
                 placeholder-text: "Masukkan Password...";
                 input-type: password;
                 font-size: 14px;
-                accepted => { root.unlock-requested(self.text); }
+                enabled: !root.is-loading;
+                accepted => {
+                    if (!root.is-loading && self.text != "") {
+                        root.is-loading = true;
+                        root.error-msg = "";
+                        root.unlock-requested(self.text);
+                    }
+                }
             }
 
             Text {
@@ -493,6 +501,7 @@ export component AppPrompt inherits Window {
                     border-width: 1px;
 
                     cancel-ta := TouchArea {
+                        enabled: !root.is-loading;
                         clicked => { root.cancel-requested(); }
                     }
 
@@ -510,14 +519,21 @@ export component AppPrompt inherits Window {
                     width: 140px;
                     height: 40px;
                     border-radius: 8px;
-                    background: unlock-ta.has-hover ? #2952a3 : #3b82f6;
+                    background: root.is-loading ? #1e3a8a : (unlock-ta.has-hover ? #2952a3 : #3b82f6);
 
                     unlock-ta := TouchArea {
-                        clicked => { root.unlock-requested(input.text); }
+                        enabled: !root.is-loading;
+                        clicked => {
+                            if (!root.is-loading && input.text != "") {
+                                root.is-loading = true;
+                                root.error-msg = "";
+                                root.unlock-requested(input.text);
+                            }
+                        }
                     }
 
                     Text {
-                        text: "🔓 Buka Kunci";
+                        text: root.is-loading ? "Memverifikasi..." : "🔓 Buka Kunci";
                         font-size: 14px;
                         font-weight: 700;
                         color: white;

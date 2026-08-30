@@ -3,6 +3,7 @@ import { LineEdit } from "std-widgets.slint";
 export component AppPrompt inherits Window {
     in property <string> target_name: "Aplikasi";
     in-out property <string> error_msg: "";
+    in-out property <bool> is_loading: false;
 
     callback unlock-requested(string);
     callback cancel-requested();
@@ -13,6 +14,7 @@ export component AppPrompt inherits Window {
     always-on-top: true;
     no-frame: false;
     background: #1a1a2e;
+    forward-focus: input;
 
     VerticalLayout {
         padding: 28px;
@@ -38,7 +40,7 @@ export component AppPrompt inherits Window {
         }
 
         Text {
-            text: target_name + " sedang dibekukan oleh sistem.";
+            text: target_name + " membutuhkan password untuk dibuka.";
             font-size: 13px;
             horizontal-alignment: center;
             color: #8888aa;
@@ -55,6 +57,14 @@ export component AppPrompt inherits Window {
                 placeholder-text: "Masukkan Password...";
                 input-type: password;
                 font-size: 14px;
+                enabled: !root.is_loading;
+                accepted => {
+                    if (!root.is_loading && self.text != "") {
+                        root.is_loading = true;
+                        root.error_msg = "";
+                        root.unlock-requested(self.text);
+                    }
+                }
             }
         }
 
@@ -78,6 +88,7 @@ export component AppPrompt inherits Window {
                 border-width: 1px;
 
                 cancel-touch := TouchArea {
+                    enabled: !root.is_loading;
                     clicked => { root.cancel-requested(); }
                 }
 
@@ -95,14 +106,21 @@ export component AppPrompt inherits Window {
                 width: 140px;
                 height: 40px;
                 border-radius: 8px;
-                background: unlock-touch.has-hover ? #2952a3 : #3b82f6;
+                background: root.is_loading ? #1e3a8a : (unlock-touch.has-hover ? #2952a3 : #3b82f6);
 
                 unlock-touch := TouchArea {
-                    clicked => { root.unlock-requested(input.text); }
+                    enabled: !root.is_loading;
+                    clicked => {
+                        if (!root.is_loading && input.text != "") {
+                            root.is_loading = true;
+                            root.error_msg = "";
+                            root.unlock-requested(input.text);
+                        }
+                    }
                 }
 
                 Text {
-                    text: "🔓 Buka Kunci";
+                    text: root.is_loading ? "Memverifikasi..." : "🔓 Buka Kunci";
                     font-size: 14px;
                     font-weight: 700;
                     color: white;

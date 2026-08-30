@@ -1,3 +1,4 @@
 /target
 /debug_bin
 /dist
+.agents/rules/
